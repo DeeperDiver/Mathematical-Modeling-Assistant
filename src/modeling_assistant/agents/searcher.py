@@ -5,8 +5,11 @@
 
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -38,6 +41,58 @@ class Searcher(ABC):
     def search(self, query: SearchQuery) -> list[SearchResult]:
         """执行检索，返回结果列表。"""
         ...
+
+
+def validate_search_results(
+    results: list[SearchResult],
+    keywords: list[str],
+    min_relevance_keywords: int = 1,
+) -> list[SearchResult]:
+    """校验检索结果：去重、过滤占位、相关性检查。
+
+    Args:
+        results: 原始检索结果列表。
+        keywords: 用于相关性校验的关键词列表。
+        min_relevance_keywords: 摘要中至少命中几个关键词才算相关。
+
+    Returns:
+        校验通过的结果列表。若全部未通过，返回空列表。
+    """
+    validated: list[SearchResult] = []
+    seen_titles: set[str] = set()
+
+    for r in results:
+        title = r.title.strip()
+        summary = r.summary.strip()
+
+        # 1. 去重（按标题，大小写不敏感）
+        title_key = title.lower()
+        if title_key in seen_titles:
+            continue
+        seen_titles.add(title_key)
+
+        # 2. 过滤占位/空结果
+        if "[占位]" in title or "[占位]" in summary:
+            continue
+        if not title or not summary:
+            continue
+
+        # 3. 相关性校验：摘要至少命中 N 个关键词
+        if keywords:
+            summary_lower = summary.lower()
+            hits = sum(1 for kw in keywords if kw.lower() in summary_lower)
+            if hits < min_relevance_keywords:
+                logger.info(
+                    "检索结果 '%s' 未通过相关性校验（命中 %d/%d 个关键词）。",
+                    title,
+                    hits,
+                    min_relevance_keywords,
+                )
+                continue
+
+        validated.append(r)
+
+    return validated
 
 
 class StubSearcher(Searcher):

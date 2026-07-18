@@ -29,6 +29,27 @@ def test_load_settings_from_env_file(tmp_path: Path):
     assert settings.feasibility_weight == 0.4
 
 
+def test_load_deepseek_api_key_and_model_from_env_file(tmp_path: Path, monkeypatch):
+    """.env 中常见的 DEEPSEEK_API_KEY / DEEPSEEK_MODEL 应被正确识别。"""
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "\n".join(
+            [
+                "DEEPSEEK_API_KEY=sk-test-key",
+                "DEEPSEEK_MODEL=deepseek-v4-pro",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.delenv("MODELING_ASSISTANT_LLM_MODEL", raising=False)
+
+    settings = load_settings(env_file)
+
+    assert settings.llm_model == "deepseek-v4-pro"
+    assert settings.api_key == "sk-test-key"
+
+
 def test_default_search_enabled():
     """Searcher 默认应启用真实检索。"""
     settings = load_settings()

@@ -7,6 +7,18 @@
 - 每个方案需给出 innovation_score（创新性 0-100）和 feasibility_score（可行性 0-100）。
 - 如果你请求了分支重建，必须说明原因并指定版本号；系统会优先采用你指定的版本。
 
+【已证伪的假设】（高置信度，禁止再提相关方案，必须在新方案中规避或修正）
+{empirical_refuted_json}
+
+【待验证的观察】（低置信度，仅供参考，不要盲信但可以在方案中讨论）
+{empirical_open_questions_json}
+
+【历史执行证据索引】（如需查看某次执行的完整 stdout 日志，请在 `requested_evidence_run_id` 字段中指定 run_id，系统会补充该次执行的原始输出）
+{empirical_run_index_json}
+
+【数据认知更新】（数据加载阶段发现的、对原始 schema 的补充认知，建模时必须考虑）
+{data_findings_json}
+
 静态 LTM：
 {static_ltm_json}
 
@@ -39,6 +51,7 @@ LTM Archive 变更摘要（仅含版本号与变更说明，不含完整公式�
   "branch_requested": false,
   "branch_from_version": null,
   "branch_reason": "",
-  "requested_version": null
+  "requested_version": null,
+  "requested_evidence_run_id": null
 }}
 ```

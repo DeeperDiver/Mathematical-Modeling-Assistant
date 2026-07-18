@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 import subprocess
 import tempfile
@@ -18,6 +19,7 @@ from modeling_assistant.schemas.state import (
     ArtifactBundle,
     ControlState,
     DynamicLTM,
+    EmpiricalLayer,
     GraphState,
     StaticLTM,
 )
@@ -69,17 +71,21 @@ class AgentRuntime:
 
     # ── prompt 渲染 ──────────────────────────────────────────────
 
-    def render_prompt(self, name: str, state: GraphState) -> str:
+    def render_prompt(self, name: str, state: GraphState, extra: dict[str, Any] | None = None) -> str:
+        merged_extra: dict[str, Any] = {
+            "llm_model": self.settings.llm_model,
+            "output_dir": str(self.settings.output_dir),
+        }
+        if extra:
+            merged_extra.update(extra)
         context = PromptContext(
             static_ltm=state.get("static_ltm", StaticLTM()),
             dynamic_ltm=state.get("dynamic_ltm", DynamicLTM()),
             archive=state.get("ltm_archive", []),
+            empirical=state.get("empirical", EmpiricalLayer()),
             control=state.get("control", ControlState()),
             artifacts=state.get("artifacts", ArtifactBundle()),
-            extra={
-                "llm_model": self.settings.llm_model,
-                "output_dir": str(self.settings.output_dir),
-            },
+            extra=merged_extra,
         )
         return self.prompts.render(name, context)
 
@@ -156,13 +162,32 @@ class AgentRuntime:
         logger.info("写入文件: %s (%d 字符)", path, len(content))
         return str(path)
 
-    def run_code(self, code: str, timeout: int = 120) -> tuple[bool, str, str]:
-        """执行 Python 代码，返回 (success, stdout, stderr)。"""
+    def run_code(
+        self,
+        code: str,
+        timeout: int = 120,
+        data_paths: list[str] | None = None,
+    ) -> tuple[bool, str, str]:
+        """执行 Python 代码，返回 (success, stdout, stderr)。
+
+        如果提供了 data_paths，会把第一个路径通过环境变量 MODELING_DATA_PATH
+        传入子进程，并把完整列表通过 MODELING_DATA_PATHS（JSON 数组）传入。
+        """
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".py", delete=False, encoding="utf-8"
         ) as f:
             f.write(code)
             script_path = f.name
+
+        env = os.environ.copy()
+        env["MODELING_OUTPUT_DIR"] = str(self.settings.output_dir)
+        if data_paths:
+            # cwd 会被切换到 output_dir，子进程中的相对路径将基于此目录解析，
+            # 因此必须把数据路径转为绝对路径，避免 'outputs/test_data.csv'
+            # 被解析为 'outputs/outputs/test_data.csv'。
+            abs_data_paths = [str(Path(p).resolve()) for p in data_paths]
+            env["MODELING_DATA_PATH"] = abs_data_paths[0]
+            env["MODELING_DATA_PATHS"] = __import__("json").dumps(abs_data_paths, ensure_ascii=False)
 
         try:
             result = subprocess.run(
@@ -171,6 +196,7 @@ class AgentRuntime:
                 text=True,
                 timeout=timeout,
                 cwd=str(self.settings.output_dir),
+                env=env,
             )
             success = result.returncode == 0
             return success, result.stdout, result.stderr

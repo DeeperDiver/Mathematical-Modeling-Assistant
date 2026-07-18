@@ -60,3 +60,40 @@ def test_validate_empty_ltm_passes():
     ltm = DynamicLTM()
     errors = validate_dynamic_ltm(ltm)
     assert errors == []
+
+
+from modeling_assistant.agents.searcher import SearchResult, validate_search_results
+
+
+def test_validate_search_results_filters_placeholders():
+    """校验应过滤占位和空结果。"""
+    results = [
+        SearchResult(title="[占位] 参考模型", summary="占位摘要"),
+        SearchResult(title="真实论文", summary="这是一篇关于优化和交通的真实论文。"),
+        SearchResult(title="", summary="空标题"),
+    ]
+    validated = validate_search_results(results, keywords=["优化", "交通"])
+    assert len(validated) == 1
+    assert validated[0].title == "真实论文"
+
+
+def test_validate_search_results_deduplicates_by_title():
+    """校验应按标题去重。"""
+    results = [
+        SearchResult(title="相同标题", summary="摘要 A"),
+        SearchResult(title="相同标题", summary="摘要 B"),
+        SearchResult(title="另一篇", summary="摘要 C"),
+    ]
+    validated = validate_search_results(results, keywords=[])
+    assert len(validated) == 2
+
+
+def test_validate_search_results_checks_relevance():
+    """校验应过滤与关键词不相关的结果。"""
+    results = [
+        SearchResult(title="相关论文", summary="包含优化和机器学习。"),
+        SearchResult(title="不相关论文", summary="这是一篇生物学论文。"),
+    ]
+    validated = validate_search_results(results, keywords=["优化", "机器学习"], min_relevance_keywords=2)
+    assert len(validated) == 1
+    assert validated[0].title == "相关论文"

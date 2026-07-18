@@ -45,12 +45,39 @@ class AppSettings(BaseModel):
         return os.getenv(self.api_key_env)
 
 
-def load_settings(env_file: str | Path = ".env", **overrides: Any) -> AppSettings:
+def _resolve_env_path(env_file: str | Path) -> Path:
+    """Resolve the .env file path robustly.
+
+    If a relative path is given, first look in the current working directory.
+    If it does not exist there, fall back to the project root directory
+    (two levels above this settings module), so tests and scripts invoked
+    from other directories still pick up the project's .env file.
+    """
     env_path = Path(env_file)
+    if env_path.is_absolute():
+        return env_path
+
+    cwd_path = Path.cwd() / env_path
+    if cwd_path.exists():
+        return cwd_path
+
+    project_root = Path(__file__).resolve().parents[2]
+    return project_root / env_path
+
+
+def load_settings(env_file: str | Path = ".env", **overrides: Any) -> AppSettings:
+    env_path = _resolve_env_path(env_file)
     file_values = _read_env_file(env_path)
+
+    # 将 .env 中的 API key 注入当前进程的环境变量，让 AppSettings.api_key 能读取到。
+    api_key_env = os.getenv("MODELING_ASSISTANT_API_KEY_ENV") or file_values.get("MODELING_ASSISTANT_API_KEY_ENV", "DEEPSEEK_API_KEY")
+    if api_key_env in file_values and not os.getenv(api_key_env):
+        os.environ[api_key_env] = file_values[api_key_env]
+
     raw_values = {
         "llm_model": os.getenv("MODELING_ASSISTANT_LLM_MODEL")
-        or file_values.get("MODELING_ASSISTANT_LLM_MODEL"),
+        or file_values.get("MODELING_ASSISTANT_LLM_MODEL")
+        or file_values.get("DEEPSEEK_MODEL"),
         "api_key_env": os.getenv("MODELING_ASSISTANT_API_KEY_ENV")
         or file_values.get("MODELING_ASSISTANT_API_KEY_ENV"),
         "api_base_url": os.getenv("MODELING_ASSISTANT_API_BASE_URL")

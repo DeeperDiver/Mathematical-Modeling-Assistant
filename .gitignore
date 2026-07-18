@@ -8,3 +8,13 @@ dist/
 build/
 *.egg-info/
 outputs/
+
+# 敏感信息
+.env
+.env.*
+!.env.example
+
+# 临时测试文件
+.smoke_test.py
+test_write.tmp
+*.tmp

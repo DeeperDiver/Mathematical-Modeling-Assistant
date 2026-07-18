@@ -22,9 +22,11 @@ from modeling_assistant.agents.nodes import (
     milestone_reviewer_1_node,
     problem_node,
     realist_node,
+    reflection_node,
     searcher_node,
     writer_node,
 )
+from modeling_assistant.data.loader import data_profile_node
 from modeling_assistant.graph.routing import (
     route_after_architecture_hitl,
     route_after_arbiter,
@@ -32,10 +34,13 @@ from modeling_assistant.graph.routing import (
     route_after_final_review,
     route_after_milestone_reviewer_1,
     route_after_realist,
+    route_after_reflection,
+    route_after_result_reviewer,
     route_after_rollback,
 )
 from modeling_assistant.memory.archive import checkout_snapshot
-from modeling_assistant.schemas.state import GraphState
+from modeling_assistant.schemas.state import ControlState, GraphState
+from modeling_assistant.validation.results import result_reviewer_node
 
 
 NodeFn = Callable[[GraphState], GraphState]
@@ -69,12 +74,27 @@ def rollback_node(state: GraphState, config: RunnableConfig | None = None) -> Gr
     return {"dynamic_ltm": dynamic_ltm, "control": control}
 
 
+def collect_artifacts_node(
+    state: GraphState,
+    runtime: AgentRuntime | None = None,
+    config: dict | None = None,
+) -> GraphState:
+    """同步节点：等待 Drawer 与 Coder/ResultReviewer 两条并行路径都完成后触发 Writer。
+
+    LangGraph 的 fan-in 语义保证该节点在两条入边都到达后只执行一次。
+    """
+    control = state.get("control", ControlState()).model_copy(deep=True)
+    control.phase = "artifacts_collected"
+    return {"control": control}
+
+
 def build_graph(runtime: AgentRuntime | None = None, *, checkpointer: InMemorySaver | None = None):
     resolved_runtime = runtime or get_default_runtime()
     graph = StateGraph(GraphState)
 
     graph.add_node("problem", _bind_runtime(problem_node, resolved_runtime))
     graph.add_node("analyst", _bind_runtime(analyst_node, resolved_runtime))
+    graph.add_node("data_profile", _bind_runtime(data_profile_node, resolved_runtime))
     graph.add_node("searcher", _bind_runtime(searcher_node, resolved_runtime))
     graph.add_node("mathematician", _bind_runtime(mathematician_node, resolved_runtime))
     graph.add_node("realist", _bind_runtime(realist_node, resolved_runtime))
@@ -87,13 +107,17 @@ def build_graph(runtime: AgentRuntime | None = None, *, checkpointer: InMemorySa
     graph.add_node("architect", _bind_runtime(architect_node, resolved_runtime))
     graph.add_node("drawer", _bind_runtime(drawer_node, resolved_runtime))
     graph.add_node("coder", _bind_runtime(coder_node, resolved_runtime))
+    graph.add_node("result_reviewer", _bind_runtime(result_reviewer_node, resolved_runtime))
+    graph.add_node("reflection", _bind_runtime(reflection_node, resolved_runtime))
+    graph.add_node("collect_artifacts", collect_artifacts_node)
     graph.add_node("writer", _bind_runtime(writer_node, resolved_runtime))
     graph.add_node("final_reviewer", _bind_runtime(final_reviewer_node, resolved_runtime))
     graph.add_node("hitl_final", _bind_runtime(hitl_final_node, resolved_runtime))
 
     graph.add_edge(START, "problem")
     graph.add_edge("problem", "analyst")
-    graph.add_edge("analyst", "searcher")
+    graph.add_edge("analyst", "data_profile")
+    graph.add_edge("data_profile", "searcher")
     graph.add_edge("searcher", "mathematician")
     graph.add_edge("mathematician", "realist")
     graph.add_conditional_edges(
@@ -133,12 +157,31 @@ def build_graph(runtime: AgentRuntime | None = None, *, checkpointer: InMemorySa
     )
     graph.add_edge("architect", "drawer")
     graph.add_edge("architect", "coder")
-    graph.add_edge("drawer", "writer")
+    # 通过 collect_artifacts fan-in 节点同步 Drawer 与 Coder/ResultReviewer/Reflection 两条路径
+    graph.add_edge("drawer", "collect_artifacts")
     graph.add_conditional_edges(
         "coder",
         route_after_coder,
-        {"architect": "architect", "clarifier": "clarifier", "writer": "writer"},
+        {
+            "architect": "architect",
+            "clarifier": "clarifier",
+            "result_reviewer": "result_reviewer",
+            "collect_artifacts": "collect_artifacts",
+        },
     )
+    # ResultReviewer 通过 → reflection（提取实证发现）；失败 → 回退
+    graph.add_conditional_edges(
+        "result_reviewer",
+        route_after_result_reviewer,
+        {"reflection": "reflection", "architect": "architect", "clarifier": "clarifier"},
+    )
+    # Reflection 后：有 refuted 发现 → 回 Clarifier 修正假设；否则 → collect_artifacts
+    graph.add_conditional_edges(
+        "reflection",
+        route_after_reflection,
+        {"clarifier": "clarifier", "collect_artifacts": "collect_artifacts"},
+    )
+    graph.add_edge("collect_artifacts", "writer")
     graph.add_edge("writer", "final_reviewer")
     graph.add_edge("final_reviewer", "hitl_final")
     graph.add_conditional_edges(

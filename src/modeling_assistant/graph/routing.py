@@ -43,12 +43,52 @@ def route_after_arbiter(state: GraphState) -> Literal["clarifier", "rollback", "
     return "clarifier"
 
 
-def route_after_coder(state: GraphState) -> Literal["architect", "clarifier", "writer"]:
-    """Coder 之后的路由：失败超过 3 次按错误类型回退到 architect 或 clarifier。"""
+def route_after_coder(
+    state: GraphState,
+) -> Literal["architect", "clarifier", "result_reviewer", "collect_artifacts"]:
+    """Coder 之后的路由。
+
+    - 连续失败 3 次 → 按错误类型回退到 architect 或 clarifier。
+    - 有结果文件路径 → 进入 result_reviewer 验证。
+    - 无结果文件路径 → 降级到 collect_artifacts（保持流程可用性，避免死循环）。
+    """
     control = state["control"]
+    artifacts = state.get("artifacts", {})
+    result_paths = getattr(artifacts, "result_paths", []) if hasattr(artifacts, "result_paths") else artifacts.get("result_paths", [])
+
     if control.coder_error_count >= 3:
         return control.coder_rollback_target
-    return "writer"
+    if result_paths:
+        return "result_reviewer"
+    return "collect_artifacts"
+
+
+def route_after_result_reviewer(
+    state: GraphState,
+) -> Literal["reflection", "architect", "clarifier"]:
+    """ResultReviewer 之后的路由：
+
+    - 验证失败 → 按错误类型回退到 architect 或 clarifier（与原逻辑一致）
+    - 验证通过 → 进入 reflection 节点提取实证发现
+    """
+    control = state["control"]
+    if control.phase == "result_review_failed":
+        return control.coder_rollback_target
+    return "reflection"
+
+
+def route_after_reflection(state: GraphState) -> Literal["clarifier", "collect_artifacts"]:
+    """Reflection 之后的路由：
+
+    - 有高置信度 refuted 发现且修正预算未耗尽 → 回 Clarifier 修正假设
+    - 否则 → collect_artifacts（保持原流程进入 Writer）
+
+    预算耗尽时即使有 refuted 发现也强制放行，避免无限循环。
+    """
+    control = state["control"]
+    if control.trigger_clarifier_revision:
+        return "clarifier"
+    return "collect_artifacts"
 
 
 def route_after_architecture_hitl(state: GraphState) -> Literal["rollback", "architect"]:

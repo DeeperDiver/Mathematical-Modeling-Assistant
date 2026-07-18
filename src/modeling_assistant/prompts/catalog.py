@@ -15,6 +15,7 @@ class PromptContext:
     static_ltm: BaseModel | None = None
     dynamic_ltm: BaseModel | None = None
     archive: list[BaseModel] | None = None
+    empirical: BaseModel | None = None
     control: BaseModel | None = None
     artifacts: BaseModel | None = None
     extra: dict[str, Any] | None = None
@@ -59,6 +60,103 @@ class PromptContext:
             ensure_ascii=False,
             indent=2,
         )
+        # 单独渲染数据画像，方便各 prompt 模板直接引用
+        data_profile_json = "{}"
+        data_file_paths_json = "[]"
+        data_columns_json = "[]"
+        data_findings_json = "[]"
+        if self.static_ltm is not None:
+            profile = getattr(self.static_ltm, "data_profile", None)
+            if profile is not None:
+                data_profile_json = profile.model_dump_json(indent=2)
+                data_file_paths_json = json.dumps(
+                    profile.file_paths,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                data_columns_json = json.dumps(
+                    [
+                        {"name": col.name, "dtype": col.dtype}
+                        for col in profile.columns
+                    ],
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            # 数据认知更新（执行阶段发现的、对原始 schema 的补充认知）
+            data_findings_json = json.dumps(
+                getattr(self.static_ltm, "data_findings", []) or [],
+                ensure_ascii=False,
+                indent=2,
+            )
+        # ── empirical 层注入（默认只注入 L2 摘要，L3 原始日志按需查询）──
+        empirical_refuted_json = "[]"
+        empirical_open_questions_json = "[]"
+        empirical_run_index_json = "[]"
+        empirical_findings_summary_json = "[]"
+        drawer_observations_json = "[]"
+        if self.empirical is not None:
+            emp_data = self.empirical.model_dump(mode="json")
+            empirical_refuted_json = json.dumps(
+                emp_data.get("refuted_assumptions", []),
+                ensure_ascii=False,
+                indent=2,
+            )
+            empirical_open_questions_json = json.dumps(
+                emp_data.get("open_questions", []),
+                ensure_ascii=False,
+                indent=2,
+            )
+            empirical_run_index_json = json.dumps(
+                emp_data.get("run_index", []),
+                ensure_ascii=False,
+                indent=2,
+            )
+            # findings 摘要视图：只含 assumption_tested/verdict/confidence/evidence，不含 suggested_fix 等冗余字段
+            empirical_findings_summary_json = json.dumps(
+                [
+                    {
+                        "assumption_tested": f.get("assumption_tested"),
+                        "verdict": f.get("verdict"),
+                        "confidence": f.get("confidence"),
+                        "evidence": f.get("evidence"),
+                    }
+                    for f in emp_data.get("findings", [])
+                ],
+                ensure_ascii=False,
+                indent=2,
+            )
+            # Drawer 视觉观察单独提取，供 Reflection 做二次确认
+            drawer_observations_json = json.dumps(
+                [
+                    {
+                        "assumption_tested": f.get("assumption_tested"),
+                        "evidence": f.get("evidence"),
+                        "verdict": f.get("verdict"),
+                        "confidence": f.get("confidence"),
+                    }
+                    for f in emp_data.get("findings", [])
+                    if f.get("source_node") == "drawer"
+                ],
+                ensure_ascii=False,
+                indent=2,
+            )
+        # ── 动态 LTM 拆解字段（供 reflection 模板单独引用）──
+        dynamic_ltm_assumptions_json = "[]"
+        dynamic_ltm_equations_json = "[]"
+        if self.dynamic_ltm is not None:
+            dltm_data = self.dynamic_ltm.model_dump(mode="json")
+            dynamic_ltm_assumptions_json = json.dumps(
+                dltm_data.get("assumptions", []),
+                ensure_ascii=False,
+                indent=2,
+            )
+            dynamic_ltm_equations_json = json.dumps(
+                dltm_data.get("equations", []),
+                ensure_ascii=False,
+                indent=2,
+            )
+        # recent_stdout 默认空，由 reflection_node 在调用前通过 extra 注入
+        recent_stdout = str(extra.get("recent_stdout", ""))[:2000]
         return {
             "static_ltm_json": _json_model(self.static_ltm),
             "dynamic_ltm_json": _json_model(self.dynamic_ltm),
@@ -73,7 +171,22 @@ class PromptContext:
             "rebrainstorm_feedback_json": rebrainstorm_feedback_json,
             "coder_error_log_json": coder_error_log_json,
             "coder_error_count": coder_error_count,
-            **{key: str(value) for key, value in extra.items()},
+            "data_profile_json": data_profile_json,
+            "data_file_paths_json": data_file_paths_json,
+            "data_columns_json": data_columns_json,
+            "data_findings_json": data_findings_json,
+            # empirical 层
+            "empirical_refuted_json": empirical_refuted_json,
+            "empirical_open_questions_json": empirical_open_questions_json,
+            "empirical_run_index_json": empirical_run_index_json,
+            "empirical_findings_summary_json": empirical_findings_summary_json,
+            "drawer_observations_json": drawer_observations_json,
+            # 动态 LTM 拆解
+            "dynamic_ltm_assumptions_json": dynamic_ltm_assumptions_json,
+            "dynamic_ltm_equations_json": dynamic_ltm_equations_json,
+            # Reflection 专用
+            "recent_stdout": recent_stdout,
+            **{key: str(value) for key, value in extra.items() if key != "recent_stdout"},
         }
 
 

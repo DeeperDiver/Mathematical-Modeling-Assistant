@@ -28,6 +28,7 @@ class MathematicianResponse(BaseModel):
     branch_from_version: str | None = None
     branch_reason: str = ""
     requested_version: str | None = None
+    requested_evidence_run_id: str | None = None  # 请求查看某次执行的完整 stdout 日志
     # 每个 plan: {id, title, description, innovation_score, feasibility_score}
 
 
@@ -67,6 +68,16 @@ class CoderResponse(BaseModel):
 class DrawerResponse(BaseModel):
     figure_code: str = ""
     figure_paths: list[str] = Field(default_factory=list)
+    observation: str = ""  # Drawer 对所绘图像的文字观察（视觉洞察回流）
+    # 让 Drawer 自评观察的强度，避免硬编码 0.5 导致「散点明显非线性」这类强信号
+    # 永远只能进 open_questions 而无法触发 Clarifier 修正。
+    observation_verdict: Literal["confirmed", "refuted", "inconclusive"] = "inconclusive"
+    observation_confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    # 图像统计摘要：Drawer 在绘图代码中计算的关键统计量（如散点图 X/Y 范围、
+    # 凸性方向、Pearson/Spearman 相关系数），作为 observation 的客观佐证。
+    # 让 Reflection 节点能基于客观统计量对视觉观察做二次确认，而非仅依赖
+    # Drawer 的主观描述。
+    image_stats: str = ""
 
 
 class ArbiterResponse(BaseModel):
@@ -78,3 +89,20 @@ class ArbiterResponse(BaseModel):
 
 class WriterResponse(BaseModel):
     latex_content: str = ""
+
+
+class ReflectionFinding(BaseModel):
+    """Reflection 节点提取的单条实证发现。"""
+
+    assumption_tested: str
+    evidence: str
+    verdict: Literal["confirmed", "refuted", "inconclusive"]
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    suggested_fix: str | None = None
+
+
+class ReflectionResponse(BaseModel):
+    """Reflection 节点的结构化输出。"""
+
+    findings: list[ReflectionFinding] = Field(default_factory=list)
+    run_summary: str = ""  # 一句话总结本次执行
