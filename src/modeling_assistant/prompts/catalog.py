@@ -38,6 +38,7 @@ class PromptContext:
         rebrainstorm_feedback_json = "[]"
         coder_error_log_json = "[]"
         coder_error_count = "0"
+        last_result_review_issues_json = "[]"
         if self.control is not None:
             ctrl_data = self.control.model_dump()
             feasibility_threshold = str(ctrl_data.get("feasibility_threshold", 60))
@@ -54,6 +55,13 @@ class PromptContext:
                 indent=2,
             )
             coder_error_count = str(ctrl_data.get("coder_error_count", 0))
+            # V10 修复：注入 last_result_review_issues，让 Architect 区分 Coder 执行失败
+            # 和 ResultReviewer 拒绝两类失败，针对性调整模型设计
+            last_result_review_issues_json = json.dumps(
+                ctrl_data.get("last_result_review_issues", []),
+                ensure_ascii=False,
+                indent=2,
+            )
         # archive 摘要视图（轻量，仅含版本号与变更说明）
         archive_summary_json = json.dumps(
             archive_summary(list(self.archive or [])),
@@ -65,8 +73,19 @@ class PromptContext:
         data_file_paths_json = "[]"
         data_columns_json = "[]"
         data_findings_json = "[]"
+        # V11 修复：机器生成的字符串列解析建议，供 clarifier/coder 直接引用
+        data_parse_hints_json = "[]"
         if self.static_ltm is not None:
             profile = getattr(self.static_ltm, "data_profile", None)
+            # V11.4 修复：LangGraph checkpoint 反序列化时，data_profile 可能变成 dict
+            # （大表如距离矩阵触发 PydanticSerializationUnexpectedValue，导致 msgpack 回退为 dict）
+            # 这里做防御性转换，确保 profile 是 DataProfile 对象
+            if isinstance(profile, dict):
+                from modeling_assistant.schemas.state import DataProfile
+                try:
+                    profile = DataProfile.model_validate(profile)
+                except Exception:
+                    profile = None
             if profile is not None:
                 data_profile_json = profile.model_dump_json(indent=2)
                 data_file_paths_json = json.dumps(
@@ -78,6 +97,16 @@ class PromptContext:
                     [
                         {"name": col.name, "dtype": col.dtype}
                         for col in profile.columns
+                    ],
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                # 提取非空的 parse_hint
+                data_parse_hints_json = json.dumps(
+                    [
+                        {"column": col.name, "dtype": col.dtype, "parse_hint": col.parse_hint}
+                        for col in profile.columns
+                        if col.parse_hint
                     ],
                     ensure_ascii=False,
                     indent=2,
@@ -157,6 +186,27 @@ class PromptContext:
             )
         # recent_stdout 默认空，由 reflection_node 在调用前通过 extra 注入
         recent_stdout = str(extra.get("recent_stdout", ""))[:2000]
+        # recent_stderr 默认空，由 coder_node 自修复循环通过 extra 注入
+        recent_stderr = str(extra.get("recent_stderr", ""))[:2000]
+        # V10 修复：result_preview 默认空，由 writer_node 注入真实 CSV 内容预览
+        result_preview = str(extra.get("result_preview", ""))[:5000]
+        # V11 修复：problem_facts 机器提取的题目常量列表，供 clarifier/coder 引用
+        problem_facts_json = "[]"
+        if self.static_ltm is not None:
+            facts = getattr(self.static_ltm, "problem_facts", []) or []
+            problem_facts_json = json.dumps(
+                [
+                    {
+                        "value": f.value,
+                        "unit": f.unit,
+                        "context": f.context,
+                        "role_hint": f.role_hint,
+                    }
+                    for f in facts
+                ],
+                ensure_ascii=False,
+                indent=2,
+            )
         return {
             "static_ltm_json": _json_model(self.static_ltm),
             "dynamic_ltm_json": _json_model(self.dynamic_ltm),
@@ -171,10 +221,16 @@ class PromptContext:
             "rebrainstorm_feedback_json": rebrainstorm_feedback_json,
             "coder_error_log_json": coder_error_log_json,
             "coder_error_count": coder_error_count,
+            # V10 修复：注入 ResultReviewer 拒绝原因，供 architect 模板针对性调整
+            "last_result_review_issues_json": last_result_review_issues_json,
             "data_profile_json": data_profile_json,
             "data_file_paths_json": data_file_paths_json,
             "data_columns_json": data_columns_json,
             "data_findings_json": data_findings_json,
+            # V11 修复：机器生成的字符串列解析建议
+            "data_parse_hints_json": data_parse_hints_json,
+            # V11 修复：机器提取的题目常量
+            "problem_facts_json": problem_facts_json,
             # empirical 层
             "empirical_refuted_json": empirical_refuted_json,
             "empirical_open_questions_json": empirical_open_questions_json,
@@ -186,7 +242,11 @@ class PromptContext:
             "dynamic_ltm_equations_json": dynamic_ltm_equations_json,
             # Reflection 专用
             "recent_stdout": recent_stdout,
-            **{key: str(value) for key, value in extra.items() if key != "recent_stdout"},
+            # Coder 自修复专用
+            "recent_stderr": recent_stderr,
+            # Writer 专用：真实结果文件预览（V10 修复）
+            "result_preview": result_preview,
+            **{key: str(value) for key, value in extra.items() if key not in ("recent_stdout", "recent_stderr", "result_preview")},
         }
 
 

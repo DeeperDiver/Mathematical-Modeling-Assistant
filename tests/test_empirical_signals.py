@@ -79,7 +79,15 @@ def test_check_distribution_nonlinear_removed_from_data_profile():
 
 
 def test_check_assumption_violations_detects_nonlinear_via_residual():
-    """ResultReviewer 残差分析：二次拟合 R² 显著高于线性时应产出非线性 finding。"""
+    """V11.2 修复（Bug 6）：ResultReviewer 不再做残差非线性检验。
+
+    项目约定：ResultReviewer only performs mechanical checks
+    (NaN/Inf, reasonable ranges, empty/trivial results) without
+    analyzing data distributions or variable relationships.
+
+    残差非线性检验已移除，交给 Reflection 节点的 LLM 提炼。
+    本测试改为验证：强非线性数据不再产出残差非线性 finding。
+    """
     np.random.seed(42)
     # y = x² + noise：强非线性，线性拟合 R² 低，二次拟合 R² 高
     x = np.linspace(-5, 5, 200)
@@ -92,9 +100,9 @@ def test_check_assumption_violations_detects_nonlinear_via_residual():
         objective="最小化残差",
     )
     findings = _check_assumption_violations(df, ltm)
+    # V11.2：不应再产出残差非线性 finding
     nonlinear_findings = [f for f in findings if "非线性" in f.evidence or "二次 R²" in f.evidence]
-    assert len(nonlinear_findings) > 0, "残差分析应检测到非线性"
-    assert any(f.verdict == "refuted" for f in nonlinear_findings)
+    assert len(nonlinear_findings) == 0, "V11.2: ResultReviewer 不应做残差非线性检验"
 
 
 def test_check_distribution_empty_for_normal_data():
@@ -125,7 +133,11 @@ def test_check_distribution_skips_small_samples():
 
 
 def test_check_assumption_violations_normality_unconditional():
-    """即使假设文本不提「正态」，也应对数值列做 Shapiro-Wilk 检验。"""
+    """V11.2 修复（Bug 6）：ResultReviewer 不再做 Shapiro-Wilk 正态性检验。
+
+    项目约定：分布形态分析交给 Reflection 节点的 LLM 提炼。
+    本测试改为验证：非正态数据不再产出正态性 finding。
+    """
     np.random.seed(42)
     # 非正态数据
     df = pd.DataFrame({"residual": np.random.exponential(scale=2.0, size=200)})
@@ -138,15 +150,17 @@ def test_check_assumption_violations_normality_unconditional():
     )
     findings = _check_assumption_violations(df, ltm)
 
-    # 无条件正态检验应产出 finding
+    # V11.2：不应再产出正态性 finding
     normality_findings = [f for f in findings if "正态" in f.assumption_tested]
-    assert len(normality_findings) > 0, "无条件正态检验应产出 finding，即使假设不提「正态」"
-    # 非正态应是 refuted
-    assert any(f.verdict == "refuted" for f in normality_findings)
+    assert len(normality_findings) == 0, "V11.2: ResultReviewer 不应做 Shapiro-Wilk 正态性检验"
 
 
 def test_check_assumption_violations_linear_keyword_triggered():
-    """假设提到「线性」时，应检查 Pearson 相关系数。"""
+    """V11.2 修复（Bug 6）：ResultReviewer 不再做 Pearson 相关系数检验。
+
+    项目约定：变量关系分析交给 Reflection 节点的 LLM 提炼。
+    本测试改为验证：假设提「线性」时不再产出线性关系 finding。
+    """
     np.random.seed(42)
     # 构造弱相关数据
     x = np.random.randn(100)
@@ -160,10 +174,19 @@ def test_check_assumption_violations_linear_keyword_triggered():
     )
     findings = _check_assumption_violations(df, ltm)
 
+    # V11.2：不应再产出线性关系 finding
     linear_findings = [f for f in findings if "线性" in f.assumption_tested]
-    assert len(linear_findings) > 0, "假设提「线性」时应检查线性关系"
-    # 弱相关应被 refute
-    assert any(f.verdict == "refuted" for f in linear_findings)
+    assert len(linear_findings) == 0, "V11.2: ResultReviewer 不应做 Pearson 相关系数检验"
+
+
+def test_check_assumption_violations_id_duplicate_still_works():
+    """V11.2 保留：ID 类列重复值检查（样本独立性，边界条件检查）仍应工作。"""
+    df = pd.DataFrame({"sample_id": [1, 2, 2, 3, 4, 4, 5], "value": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]})
+    ltm = DynamicLTM(assumptions=["样本独立"], nomenclature={"sample_id": "样本编号"})
+    findings = _check_assumption_violations(df, ltm)
+    id_findings = [f for f in findings if "样本独立性" in f.assumption_tested]
+    assert len(id_findings) > 0, "ID 重复应产出样本独立性 finding"
+    assert any(f.verdict == "refuted" for f in id_findings)
 
 
 # ──────────────────────────────────────────────────────────────────────────

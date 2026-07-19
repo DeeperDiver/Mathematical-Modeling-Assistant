@@ -19,6 +19,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from modeling_assistant.data.facts import annotate_parse_hints
 from modeling_assistant.schemas.state import (
     ColumnProfile,
     ControlState,
@@ -286,12 +287,23 @@ def load_data_profile(file_paths: list[str]) -> DataProfile:
         _compute_column_profile(str(col), df[col]) for col in df.columns
     ]
 
+    # V11 修复：为 text 列自动生成解析建议（纯机器推断，不调用 LLM）
+    annotate_parse_hints(profile.columns)
+
     # 问题检测
     profile.issues.extend(_detect_issues(df))
 
     # 样本（最多 5 行，字符串化）
     try:
-        profile.sample_head = df.head(5).astype(str).to_dict(orient="records")
+        # V11.4 修复：距离矩阵等文件的列名可能是 int（如 0,1,2,...），
+        # to_dict 后 dict key 是 int，与 schema list[dict[str, Any]] 不符，
+        # 导致 Pydantic 序列化失败 → checkpoint 反序列化 data_profile 为 dict。
+        # 这里强制把 key 转成 str，保证 schema 一致性。
+        raw_records = df.head(5).astype(str).to_dict(orient="records")
+        profile.sample_head = [
+            {str(k): v for k, v in record.items()}
+            for record in raw_records
+        ]
     except Exception:
         profile.sample_head = []
 
@@ -359,6 +371,25 @@ def data_profile_node(
                 logger.warning("分布检验失败: %s", exc)
     else:
         static_ltm.data_profile = DataProfile()
+
+    # V11.4 修复：data_profile 准备好后，重新对 problem_facts 做 category 分类
+    # 原因：fact_extractor_node 在 data_profile 之前运行，此时 columns=None，
+    # 所有 fact 都被标为 physical_param/count，data_range 类（如"GC 含量正常范围 40%-60%"）
+    # 无法被识别。这里在 data_profile 完成后用真实列名重新分类，让校验器能正确跳过
+    # data_range 类 fact。
+    if static_ltm.problem_facts and static_ltm.data_profile and static_ltm.data_profile.columns:
+        from modeling_assistant.data.facts import classify_fact
+        reclassified = 0
+        for fact in static_ltm.problem_facts:
+            new_category = classify_fact(fact, static_ltm.data_profile.columns)
+            if new_category != fact.category:
+                fact.category = new_category
+                reclassified += 1
+        if reclassified:
+            logger.info(
+                "data_profile_node: V11.4 重新分类 %d 个 fact（基于 %d 个数据列）",
+                reclassified, len(static_ltm.data_profile.columns),
+            )
 
     control.phase = "data_profile_loaded"
     return {"static_ltm": static_ltm, "empirical": empirical, "control": control}

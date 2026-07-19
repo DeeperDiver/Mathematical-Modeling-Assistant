@@ -1,0 +1,32 @@
+=== RUN run_0 (FAILED) ===
+=== STDERR ===
+Traceback (most recent call last):
+  File "C:\Users\lingi\AppData\Local\Temp\tmp01icmtc1.py", line 58, in <module>
+    df['GA_parsed'] = df['检测孕周'].apply(parse_gestational_week)
+                      ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\lingi\AppData\Local\Programs\Python\Python313\Lib\site-packages\pandas\core\series.py", line 5084, in apply
+    ).apply()
+      ~~~~~^^
+  File "C:\Users\lingi\AppData\Local\Programs\Python\Python313\Lib\site-packages\pandas\core\apply.py", line 1520, in apply
+    return self.apply_standard()
+           ~~~~~~~~~~~~~~~~~~~^^
+  File "C:\Users\lingi\AppData\Local\Programs\Python\Python313\Lib\site-packages\pandas\core\apply.py", line 1578, in apply_standard
+    mapped = obj._map_values(mapper=curried)
+  File "C:\Users\lingi\AppData\Local\Programs\Python\Python313\Lib\site-packages\pandas\core\base.py", line 1020, in _map_values
+    return arr.map(mapper, na_action=na_action)
+           ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\lingi\AppData\Local\Programs\Python\Python313\Lib\site-packages\pandas\core\arrays\arrow\array.py", line 1741, in map
+    return super().map(mapper, na_action)
+           ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\lingi\AppData\Local\Programs\Python\Python313\Lib\site-packages\pandas\core\arrays\base.py", line 2744, in map
+    return map_array(self, mapper, na_action=na_action)
+  File "C:\Users\lingi\AppData\Local\Programs\Python\Python313\Lib\site-packages\pandas\core\algorithms.py", line 1710, in map_array
+    return lib.map_infer(values, mapper)
+           ~~~~~~~~~~~~~^^^^^^^^^^^^^^^^
+  File "pandas/_libs/lib.pyx", line 3071, in pandas._libs.lib.map_infer
+  File "C:\Users\lingi\AppData\Local\Temp\tmp01icmtc1.py", line 56, in parse_gestational_week
+    return float(s)
+ValueError: could not convert string to float: '16W+1'
+
+=== STDOUT ===
+

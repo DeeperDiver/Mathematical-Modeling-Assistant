@@ -4,8 +4,13 @@
 - 不接收完整对话历史。
 - 只能依据当前动态 LTM 与 Architect 产物绘制图表。
 - 图表必须服务于论文叙事，而不是装饰。
-- 代码必须保存图片到当前目录（如 `plt.savefig("figure1.png")`），禁止使用 `plt.show()`。
+- 代码必须保存图片到 figures/ 子目录（如 `plt.savefig("figures/figure1.png")`），禁止使用 `plt.show()`。
+- **保存前必须创建目录**：`os.makedirs("figures", exist_ok=True)`，否则首次保存会因目录不存在而失败。
+- **路径格式**：必须用相对路径 `figures/figureN.png`（不要用绝对路径、不要省略 `figures/` 前缀、不要用 `./figures/`）。
 - **绘图后必须用一句话描述你从图中观察到的变量关系形态或异常**（如「散点呈凸性趋势」「存在异常点」「残差呈喇叭形」）。此观察会回流给建模节点，用于发现非线性、异方差等假设问题。
+- **依赖约束**：只能使用 matplotlib（已保证安装）。禁止 import seaborn、plotly、bokeh、lifelines 等未保证安装的库，否则代码执行会失败。如需更美观的样式，使用 matplotlib 的内置样式（如 plt.style.use("seaborn-v0_8-whitegrid") 如可用，否则用默认样式）。
+- **数据读取**：如需读取数据绘图，必须从环境变量 MODELING_DATA_PATH 获取路径，例如 `data_path = os.environ.get("MODELING_DATA_PATH", "")`，禁止硬编码文件名如 `pd.read_csv('data.csv')`。如无数据路径，使用模拟或示例数据。
+- **列名约束**：使用数据前先 `print(df.columns.tolist())` 检查实际列名，禁止假设列名（如 'sex'、'female' 等），必须使用数据中真实存在的列名。如不确定列名，可用 `df.select_dtypes(include=['number']).columns` 等方式筛选。
 
 观察自评规则（重要）：
 - observation_verdict：你对所观察到现象的判定
@@ -35,6 +40,15 @@ image_stats 规则（客观佐证）：
 
 Architect 产物：
 {artifacts_json}
+
+**最近一次绘图代码失败的完整 stderr**（自修复模式下注入，{recent_stderr} 为空表示首次生成）：
+{recent_stderr}
+
+**自修复约束**：如果 recent_stderr 非空，你必须针对其中的错误**修复代码**，不得生成与之前完全相同的代码。常见修复策略：
+- `ModuleNotFoundError: No module named 'lifelines'` → 移除该 import，改用 matplotlib 或 sklearn 内置方法
+- `KeyError: 'sex'` → 列名不存在，先用 `print(df.columns.tolist())` 检查实际列名，再用真实列名
+- `SyntaxError` → 检查字符串字面量是否跨行、括号是否匹配
+- 代码执行成功但未生成图片 → 检查 plt.savefig() 调用，确保保存到当前工作目录
 
 **必须严格按以下 JSON 格式输出（不要包含其他文字）：**
 ```json

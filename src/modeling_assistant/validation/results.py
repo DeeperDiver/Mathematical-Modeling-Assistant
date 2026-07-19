@@ -89,6 +89,15 @@ def _check_reasonable_ranges(df: pd.DataFrame) -> list[str]:
             if min_val < 0:
                 issues.append(f"误差指标 '{col}' 出现负值：{min_val}")
 
+        # V11.2 修复（Bug 5）：R² 类指标应在 [0, 1] 区间
+        # 负 R² 表示拟合劣于常数模型，是算法未收敛的强信号
+        if any(k in col_lower for k in ("r2", "r_squared", "r²", "r_2", "r2_score", "r_square")):
+            if min_val < -0.001:  # 容忍浮点误差
+                issues.append(
+                    f"R² 指标 '{col}' 出现负值 {min_val:.4f}，拟合劣于常数模型，"
+                    f"可能未收敛或模型设定错误"
+                )
+
     return issues
 
 
@@ -186,141 +195,24 @@ def validate_results(result_paths: list[str]) -> dict[str, Any]:
 def _check_assumption_violations(
     df: pd.DataFrame, dynamic_ltm: DynamicLTM
 ) -> list[EmpiricalFinding]:
-    """基于动态 LTM 中的假设文本做机械检验，不调 LLM。
+    """V11.2 修复（Bug 6）：回归纯机械检查，不做分布/关系分析。
 
-    覆盖三类常见假设：
-    1. 正态性：对结果文件的数值列无条件做 Shapiro-Wilk 检验
-       （分布形态是数据的客观属性，不应依赖假设文本关键词；
-       若假设未提正态但数据实际非正态，仍应产出 refuted 让 Clarifier 修正）
-    2. 线性关系：假设文本提到「线性」时，检查最大 Pearson 相关系数
-       （「线性」是建模假设而非数据属性，保留关键词触发）
-    3. 样本独立性：检查 ID 类列是否有重复值
+    项目约定：ResultReviewer only performs mechanical checks
+    (NaN/Inf, reasonable ranges, empty/trivial results) without
+    analyzing data distributions or variable relationships.
 
-    检验失败（p<0.05 或规则违反）才产出 refuted 发现；
-    检验通过产出 confirmed 发现（让下游知道假设已被验证）。
-    其余情况不产出，避免污染 empirical 层。
+    分布形态（Shapiro-Wilk）和变量关系（Pearson/R²）属于 LLM 提炼范畴，
+    应交给 Reflection 节点基于完整 stdout 分析，而非在 ResultReviewer 用
+    统计检验自动产出 refuted finding 误触发 Clarifier 修正。
+
+    保留：
+    - 样本独立性检验（ID 类列重复值）：属于边界条件检查，非分布/关系分析
     """
     findings: list[EmpiricalFinding] = []
     if dynamic_ltm is None:
         return findings
 
-    # 假设文本拼合（小写）
-    assumptions_text = " ".join(getattr(dynamic_ltm, "assumptions", []) or []).lower()
-
-    numeric_df = df.select_dtypes(include=["number"])
-
-    # 1. 正态性检验（无条件，对所有数值列做）
-    # 分布形态是数据客观属性，不应依赖假设文本是否提到「正态」
-    for col in numeric_df.columns:
-        series = numeric_df[col].dropna()
-        # Shapiro-Wilk 对样本量有限制（建议 8 ≤ n ≤ 5000）
-        if 8 <= len(series) <= 5000:
-            try:
-                from scipy import stats
-
-                stat, p = stats.shapiro(series)
-                if p < 0.05:
-                    findings.append(EmpiricalFinding(
-                        id=f"auto_normality_{col}",
-                        run_id="auto",
-                        source_node="result_reviewer",
-                        assumption_tested=f"{col} 列正态性",
-                        evidence=f"Shapiro-Wilk 统计量={stat:.3f}, p={p:.4f} < 0.05",
-                        verdict="refuted",
-                        confidence=0.9,
-                        suggested_fix="对数变换 / Box-Cox 变换 / 改用非参数检验",
-                    ))
-                else:
-                    findings.append(EmpiricalFinding(
-                        id=f"auto_normality_{col}_ok",
-                        run_id="auto",
-                        source_node="result_reviewer",
-                        assumption_tested=f"{col} 列正态性",
-                        evidence=f"Shapiro-Wilk p={p:.4f} ≥ 0.05",
-                        verdict="confirmed",
-                        confidence=0.75,
-                    ))
-            except Exception as exc:
-                logger.debug("Shapiro 检验失败 %s: %s", col, exc)
-
-    # 2. 线性关系检验（保留关键词触发：「线性」是建模假设而非数据属性）
-    if any(k in assumptions_text for k in ("线性", "linear")) and len(numeric_df.columns) >= 2:
-        try:
-            corr_matrix = numeric_df.corr(method="pearson").abs()
-            # 屏蔽对角线，取最大相关系数
-            # 注意：pandas DataFrame.values 可能是只读视图，必须 .copy() 才能修改
-            corr_vals = corr_matrix.values.copy()
-            np.fill_diagonal(corr_vals, 0)
-            max_corr = float(pd.DataFrame(corr_vals, index=corr_matrix.index, columns=corr_matrix.columns).max().max())
-            if not np.isnan(max_corr):
-                if max_corr < 0.3:
-                    findings.append(EmpiricalFinding(
-                        id="auto_linear_check",
-                        run_id="auto",
-                        source_node="result_reviewer",
-                        assumption_tested="变量间线性关系",
-                        evidence=f"最大 Pearson 相关系数 {max_corr:.3f}，线性关系微弱",
-                        verdict="refuted",
-                        confidence=0.7,
-                        suggested_fix="考虑非线性模型、交互项或核方法",
-                    ))
-                elif max_corr > 0.7:
-                    findings.append(EmpiricalFinding(
-                        id="auto_linear_check_ok",
-                        run_id="auto",
-                        source_node="result_reviewer",
-                        assumption_tested="变量间线性关系",
-                        evidence=f"最大 Pearson 相关系数 {max_corr:.3f}",
-                        verdict="confirmed",
-                        confidence=0.75,
-                    ))
-            # 2b. 残差非线性检验：对最强相关变量对做线性 vs 二次拟合 R² 对比
-            # 无条件执行（不依赖 max_corr 阈值）：即使线性相关弱，也可能存在强非线性关系（如 U 型）
-            try:
-                # 找到最强相关变量对（按绝对值）
-                corr_matrix_raw = numeric_df.corr(method="pearson")
-                abs_corr = corr_matrix_raw.abs()
-                abs_vals = abs_corr.values.copy()
-                np.fill_diagonal(abs_vals, 0)
-                # 找最大值位置
-                max_idx = np.unravel_index(np.nanargmax(abs_vals), abs_vals.shape)
-                col1, col2 = numeric_df.columns[max_idx[0]], numeric_df.columns[max_idx[1]]
-                x = numeric_df[col1].dropna()
-                y = numeric_df[col2].dropna()
-                # 对齐索引
-                common = x.index.intersection(y.index)
-                x = x.loc[common].values
-                y = y.loc[common].values
-                if len(x) >= 10 and np.std(x) > 0 and np.std(y) > 0:
-                    # 线性拟合 R²
-                    coeffs_lin = np.polyfit(x, y, 1)
-                    y_pred_lin = np.polyval(coeffs_lin, x)
-                    ss_res_lin = np.sum((y - y_pred_lin) ** 2)
-                    ss_tot = np.sum((y - np.mean(y)) ** 2)
-                    r2_lin = 1 - ss_res_lin / ss_tot if ss_tot > 0 else 0
-                    # 二次拟合 R²
-                    coeffs_quad = np.polyfit(x, y, 2)
-                    y_pred_quad = np.polyval(coeffs_quad, x)
-                    ss_res_quad = np.sum((y - y_pred_quad) ** 2)
-                    r2_quad = 1 - ss_res_quad / ss_tot if ss_tot > 0 else 0
-                    # 若二次拟合 R² 显著高于线性（提升 > 0.1），说明存在非线性
-                    if r2_quad - r2_lin > 0.1:
-                        findings.append(EmpiricalFinding(
-                            id=f"auto_nonlinear_{col1}_{col2}",
-                            run_id="auto",
-                            source_node="result_reviewer",
-                            assumption_tested=f"{col1} 与 {col2} 间线性关系",
-                            evidence=f"线性 R²={r2_lin:.3f}, 二次 R²={r2_quad:.3f}（提升 {r2_quad - r2_lin:.3f}，存在非线性）",
-                            verdict="refuted",
-                            confidence=0.8,
-                            suggested_fix="改用二次多项式、样条回归或树模型",
-                        ))
-            except Exception as exc:
-                logger.debug("残差非线性检验失败: %s", exc)
-        except Exception as exc:
-            logger.debug("线性关系检验失败: %s", exc)
-
-    # 3. 样本独立性检验（ID 类列重复值）
+    # 样本独立性检验（ID 类列重复值）— 边界条件检查，保留
     for col in df.columns:
         col_lower = str(col).lower()
         if any(k in col_lower for k in ("id", "编号", "样本号")) and not df[col].isna().all():
@@ -362,6 +254,8 @@ def result_reviewer_node(
         control.coder_error_count += 1
         control.coder_error_log.append("ResultReviewer: 没有结果文件路径。")
         control.coder_rollback_target = "architect"
+        # V9 修复：标记清空 result_paths（虽然此处已为空，但保持一致性）
+        artifacts.clear_result_paths = True
         return {"control": control, "artifacts": artifacts, "empirical": empirical}
 
     report = validate_results(artifacts.result_paths)
@@ -370,13 +264,20 @@ def result_reviewer_node(
         control.coder_error_count += 1
         control.coder_error_log.extend(report["issues"])
 
-        # 根据问题类型选择回滚目标
-        issues_text = "\n".join(report["issues"]).lower()
-        if any(k in issues_text for k in ("不存在", "无法读取", "为空表", "没有结果")):
-            control.coder_rollback_target = "architect"
-        else:
-            control.coder_rollback_target = "clarifier"
+        # V10 修复：保存 ResultReviewer 拒绝原因，供 Architect 针对性调整模型设计
+        # 让 Architect 区分 "Coder 执行失败"（语法/API）和 "Coder 成功但结果质量不通过"
+        control.last_result_review_issues = list(report["issues"])
 
+        # V10 修复：ResultReviewer 拒绝时强制走 architect（而非根据 issue 文本判断）
+        # 原逻辑：根据 issue 文本决定回退到 architect 或 clarifier，但 ResultReviewer
+        # 拒绝的本质是"模型设计导致结果质量不通过"（如常量列、边界值），这是 Architect
+        # 的职责而非 Clarifier 的职责。Clarifier 修正的是假设，Architect 修正的是模型约束。
+        control.coder_rollback_target = "architect"
+
+        # V9 修复：清空旧 result_paths，避免 writer 误用旧结果文件
+        # 同时让 route_after_reflection 看到 result_paths 为空，正确走回退路径
+        artifacts.result_paths = []
+        artifacts.clear_result_paths = True
         logger.warning("ResultReviewer 失败：%s", report["issues"])
         return {"control": control, "artifacts": artifacts, "empirical": empirical}
 

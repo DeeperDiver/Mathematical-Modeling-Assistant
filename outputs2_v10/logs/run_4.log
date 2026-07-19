@@ -1,0 +1,27 @@
+=== RUN run_4 (SUCCESS) ===
+=== STDOUT ===
+原始数据行数: 1082
+男胎数: 1075 女胎数: 7
+T_i 统计: count    267.000000
+mean      15.407878
+std        5.465068
+min       10.000000
+25%       10.999253
+50%       12.466544
+75%       19.953628
+max       25.000000
+Name: T_i, dtype: float64
+最佳k (BMI): 3 得分: 0.5967374434128743
+最佳k (Multi): 2 得分: 0.3319095894170981
+BMI分组最优时点: {np.int32(0): np.float64(22.0), np.int32(1): 13.0, np.int32(2): np.float64(21.0)}
+Multi分组最优时点: {np.int32(0): np.float64(22.0), np.int32(1): 13.0}
+女胎数: 7
+结果已保存: C:\Users\lingi\Desktop\Research\Mo\Modeling_Assistant\outputs2_v10\results\output.csv
+完成
+
+=== STDERR ===
+C:\Users\lingi\AppData\Local\Programs\Python\Python313\Lib\site-packages\statsmodels\regression\mixed_linear_model.py:2237: ConvergenceWarning: The MLE may be on the boundary of the parameter space.
+  warnings.warn(msg, ConvergenceWarning)
+
+=== RESULT ===
+outputs2_v10\results\output.csv

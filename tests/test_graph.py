@@ -198,25 +198,142 @@ def test_coder_rollback_classification():
 
 
 def test_route_after_coder_supports_clarifier():
+    """V6.1 修改：所有 coder 失败（result_paths 空）都经过 reflection，
+    由 reflection_node 消费 budget，route_after_reflection 决定回退到 coder_rollback_target。
+    所以 route_after_coder 不再直接返回 clarifier/architect，而是返回 reflection。
+    """
     from modeling_assistant.graph.routing import route_after_coder
 
+    # coder 失败 3 次 + result_paths 空 → reflection（让 reflection 消费 budget）
     state = {
         "control": ControlState(
             coder_error_count=3,
             coder_rollback_target="clarifier",
-        )
+        ),
+        "artifacts": ArtifactBundle(result_paths=[]),
     }
-    assert route_after_coder(state) == "clarifier"
+    assert route_after_coder(state) == "reflection"
 
+    # coder 失败 3 次 + result_paths 空 + rollback_target=architect → 仍然 reflection
     state["control"] = ControlState(
         coder_error_count=3,
         coder_rollback_target="architect",
     )
-    assert route_after_coder(state) == "architect"
+    assert route_after_coder(state) == "reflection"
 
-    # 无结果文件路径时降级到 collect_artifacts，等待 Drawer 完成后统一触发 Writer
+    # 无结果文件路径时（Coder 失败/空代码）进入 reflection 节点，
+    # 从失败日志中提炼"假设是否可数值化"等实证信号，而非直接丢弃
     state["control"] = ControlState(coder_error_count=0)
-    assert route_after_coder(state) == "collect_artifacts"
+    assert route_after_coder(state) == "reflection"
+
+    # 有结果文件路径 → result_reviewer（即使 coder_error_count >= 3）
+    state = {
+        "control": ControlState(
+            coder_error_count=3,
+            coder_rollback_target="architect",
+        ),
+        "artifacts": ArtifactBundle(result_paths=["outputs/results/output.csv"]),
+    }
+    assert route_after_coder(state) == "result_reviewer"
+
+
+def test_route_after_coder_budget_exhausted_forces_reflection():
+    """V6.1 修复：coder 失败 + budget 耗尽 + result_paths 空 → 仍前进到 reflection，
+    让 route_after_reflection 处理 collect_artifacts，避免死循环。
+    注意：route_after_coder 现在不区分 budget 是否耗尽，统一返回 reflection。
+    budget 控制由 reflection_node + route_after_reflection 负责。
+    """
+    from modeling_assistant.graph.routing import route_after_coder
+
+    # budget 耗尽 + 失败 3 次 + result_paths 空 → reflection
+    state = {
+        "control": ControlState(
+            coder_error_count=3,
+            coder_rollback_target="architect",
+            modeling_revision_count=4,
+            modeling_revision_budget=4,
+        ),
+        "artifacts": ArtifactBundle(result_paths=[]),
+    }
+    assert route_after_coder(state) == "reflection"
+
+    # budget 未耗尽 + 失败 3 次 + result_paths 空 → 也 reflection
+    state["control"] = ControlState(
+        coder_error_count=3,
+        coder_rollback_target="architect",
+        modeling_revision_count=2,
+        modeling_revision_budget=4,
+    )
+    assert route_after_coder(state) == "reflection"
+
+
+def test_route_after_reflection_empty_results_returns_to_architect():
+    """V6 修复（问题 B）：coder 失败（result_paths 空）+ budget 未耗尽 → 回退到 architect 重试，
+    而非前进到 writer 生成不完整论文。
+    """
+    from modeling_assistant.graph.routing import route_after_reflection
+
+    # coder 失败 + budget 未耗尽 → 回退到 coder_rollback_target
+    state = {
+        "control": ControlState(
+            coder_rollback_target="architect",
+            modeling_revision_count=1,
+            modeling_revision_budget=4,
+        ),
+        "artifacts": ArtifactBundle(result_paths=[]),
+    }
+    assert route_after_reflection(state) == "architect"
+
+    # coder 失败 + budget 未耗尽 + coder_rollback_target=clarifier → 回退到 clarifier
+    state["control"] = ControlState(
+        coder_rollback_target="clarifier",
+        modeling_revision_count=1,
+        modeling_revision_budget=4,
+    )
+    assert route_after_reflection(state) == "clarifier"
+
+
+def test_route_after_reflection_empty_results_budget_exhausted_forces_writer():
+    """V6 修复：coder 失败 + budget 耗尽 → 强制前进到 collect_artifacts，
+    writer 会在 integrity_warnings 中标注 result_paths 为空。
+    """
+    from modeling_assistant.graph.routing import route_after_reflection
+
+    state = {
+        "control": ControlState(
+            coder_rollback_target="architect",
+            modeling_revision_count=4,
+            modeling_revision_budget=4,
+        ),
+        "artifacts": ArtifactBundle(result_paths=[]),
+    }
+    assert route_after_reflection(state) == "collect_artifacts"
+
+
+def test_route_after_reflection_with_results_goes_to_collect_artifacts():
+    """正常路径：coder 成功（result_paths 非空）→ collect_artifacts → writer。"""
+    from modeling_assistant.graph.routing import route_after_reflection
+
+    state = {
+        "control": ControlState(),
+        "artifacts": ArtifactBundle(result_paths=["outputs/results/output.csv"]),
+    }
+    assert route_after_reflection(state) == "collect_artifacts"
+
+
+def test_route_after_reflection_trigger_clarifier_goes_to_clarifier():
+    """trigger_clarifier_revision=True + budget 未耗尽 → clarifier（保留原逻辑）。"""
+    from modeling_assistant.graph.routing import route_after_reflection
+
+    state = {
+        "control": ControlState(
+            trigger_clarifier_revision=True,
+            modeling_revision_count=1,
+            modeling_revision_budget=4,
+        ),
+        "artifacts": ArtifactBundle(result_paths=[]),
+    }
+    assert route_after_reflection(state) == "clarifier"
 
 
 def test_route_after_final_review_goes_to_rollback():

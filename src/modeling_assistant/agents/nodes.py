@@ -10,6 +10,7 @@ from langgraph.types import interrupt
 
 from modeling_assistant.agents.runtime import AgentRuntime, get_default_runtime
 from modeling_assistant.agents.searcher import SearchQuery
+from modeling_assistant.data.facts import extract_facts_from_problem
 from modeling_assistant.memory.archive import make_snapshot
 from modeling_assistant.memory.validation import validate_dynamic_ltm
 from modeling_assistant.schemas.responses import (
@@ -90,6 +91,53 @@ def problem_node(state: GraphState, runtime: AgentRuntime | None = None, config:
     control.feasibility_weight = resolved_runtime.settings.feasibility_weight
     control.phase = "problem_loaded"
     return {"control": control}
+
+
+def fact_extractor_node(
+    state: GraphState,
+    runtime: AgentRuntime | None = None,
+    config: dict | None = None,
+) -> GraphState:
+    """V11 三层防线第一层：纯机器提取题目数值常量。
+
+    在 problem_node 之后、analyst_node 之前运行。
+    用正则从 raw_problem 提取所有 (数值, 单位, 上下文) 三元组，
+    写入 static_ltm.problem_facts，作为后续所有节点的"真理基准"。
+
+    特点：
+    - 纯代码，不调用 LLM，零成本、零幻觉
+    - 不可被 LLM 改写（StaticLTM 字段语义为不可变）
+    - 后续 Clarifier/Coder 必须引用这些值，否则触发第二层/第三层校验告警
+    """
+    static_ltm = _static_ltm(state)
+    control = _control(state)
+
+    if not static_ltm.raw_problem:
+        logger.warning("fact_extractor_node: raw_problem 为空，跳过提取")
+        control.phase = "facts_extracted"
+        return {"static_ltm": static_ltm, "control": control}
+
+    # 纯机器提取
+    # V11.4：传入 data_profile.columns 用于 classify_fact 双重判据识别 data_range
+    columns = (
+        static_ltm.data_profile.columns
+        if static_ltm.data_profile and static_ltm.data_profile.columns
+        else None
+    )
+    facts = extract_facts_from_problem(static_ltm.raw_problem, columns=columns)
+    static_ltm.problem_facts = facts
+
+    if facts:
+        logger.info(
+            "fact_extractor_node: 提取到 %d 个数值常量，示例：%s",
+            len(facts),
+            [(f.value, f.unit, f.category, f.context[:30]) for f in facts[:3]],
+        )
+    else:
+        logger.info("fact_extractor_node: 未提取到带单位的数值常量")
+
+    control.phase = "facts_extracted"
+    return {"static_ltm": static_ltm, "control": control}
 
 
 def analyst_node(state: GraphState, runtime: AgentRuntime | None = None, config: dict | None = None) -> GraphState:
@@ -449,10 +497,16 @@ def clarifier_node(state: GraphState, runtime: AgentRuntime | None = None, confi
     - 写入新 LTM 前先归档旧 LTM 到 Archive
     - major_bump：若 objective 发生根本性变化 → v2.0，否则 v1.x
     - 校验符号闭环；失败则在 prompt_audit 记录错误
+
+    V11 修复：在写入 dynamic_ltm 之前，调用第二层常量校验。
+    检查 assumptions/equations 中的数值是否与 problem_facts 一致。
+    如果出现冲突（如 3 m/s 被写成 1 m/s），记录到 audit 与 coder_error_log，
+    让下游节点能看到常量偏差，但不阻塞流程（避免死循环）。
     """
     resolved_runtime = _runtime(runtime)
     control = _control(state)
     old_dynamic_ltm = _dynamic_ltm(state)
+    static_ltm = _static_ltm(state)
     archive = state.get("ltm_archive", [])
 
     system_prompt, audit = _prompt_audit("clarifier", state, runtime)
@@ -493,36 +547,28 @@ def clarifier_node(state: GraphState, runtime: AgentRuntime | None = None, confi
             solution_outline=plan_description,
         )
 
-    # 符号查重与公式闭环校验
+    # 符号查重校验（公式闭环已移除，见 validation.py）
     validation_errors = validate_dynamic_ltm(new_dynamic_ltm)
     if validation_errors:
         audit["clarifier_validation_errors"] = "; ".join(validation_errors)
-        logger.warning("Clarifier LTM 校验失败：%s", validation_errors)
-        # 尝试一次 LLM 修复
-        try:
-            repair_prompt = system_prompt + "\n\n以下是符号/公式校验错误，请修正后重新输出：\n" + "\n".join(validation_errors)
-            repaired = resolved_runtime.invoke_structured(
-                "clarifier", state, ClarifierResponse, system_prompt=repair_prompt
-            )
-            commit_summary = repaired.commit_summary
-            new_dynamic_ltm = DynamicLTM(
-                assumptions=repaired.assumptions,
-                nomenclature=repaired.nomenclature,
-                equations=repaired.equations,
-                objective=repaired.objective,
-                solution_outline=repaired.solution_outline,
-            )
-            remaining = validate_dynamic_ltm(new_dynamic_ltm)
-            if not remaining:
-                audit["clarifier_validation_errors"] = ""
-                logger.info("Clarifier LLM 修复后校验通过。")
-            else:
-                audit["clarifier_validation_errors"] = "; ".join(remaining)
-                logger.warning("Clarifier 修复后仍有校验错误，保留 LLM 输出。")
-        except Exception as repair_exc:
-            logger.error("Clarifier 修复尝试失败: %s", repair_exc)
+        logger.warning("Clarifier LTM 符号查重警告：%s", validation_errors)
+        # 移除内部修复循环：符号查重很少失败，即使失败也由 milestone_reviewer_1 审查
+        # 原修复循环实测 5 次全部失败，徒耗 LLM 调用
 
-    # 归档旧 LTM：objective 变化 → major_bump (v2.0)
+    # V11 修复：第二层常量校验 —— 在写入 dynamic_ltm 之前检查数值一致性
+    from modeling_assistant.validation.constants import check_ltm_against_facts
+    constant_issues = check_ltm_against_facts(new_dynamic_ltm, static_ltm)
+    if constant_issues:
+        audit["clarifier_constant_issues"] = "; ".join(constant_issues)
+        logger.warning("Clarifier 常量校验告警：%s", constant_issues)
+        # 把常量校验告警附加到 rebrainstorm_feedback，让 milestone_reviewer 看到
+        # 但不阻塞写入（避免死循环），由下游节点决定是否需要重新 brainstorm
+        # 这里把告警放进 coder_error_log 以便 Architect/Coder 能看到
+        control.coder_error_log.extend(constant_issues)
+
+    # 归档：snapshot 存 new_dynamic_ltm（提交快照语义，而非"被覆盖的旧版"）
+    # 这样 rollback 到 vN 取出的是"vN 这次提交的内容"，而非"vN 之前的内容"。
+    # 第一次调用时 old_dynamic_ltm 为空，archive 为空 → v1.0 是首次提交的内容。
     major_change = (
         old_dynamic_ltm.objective != ""
         and new_dynamic_ltm.objective != old_dynamic_ltm.objective
@@ -531,9 +577,9 @@ def clarifier_node(state: GraphState, runtime: AgentRuntime | None = None, confi
     if config and "configurable" in config:
         checkpoint_id = config["configurable"].get("checkpoint_id")
     snapshot = make_snapshot(
-        old_dynamic_ltm,
+        new_dynamic_ltm,
         archive,
-        reason="Clarifier overwrote Core State Two.",
+        reason="Clarifier committed new Core State Two.",
         commit_summary=commit_summary,
         major_bump=major_change,
         checkpoint_id=checkpoint_id,
@@ -542,6 +588,9 @@ def clarifier_node(state: GraphState, runtime: AgentRuntime | None = None, confi
     control.phase = "dynamic_ltm_committed"
     control.hitl_required = True
     control.hitl_stage = "architecture"
+    # 重置 trigger_clarifier_revision：Clarifier 已完成修正，下游 collect_artifacts
+    # 可正常前进到 Writer。否则该标志会一直为 True，导致 collect_artifacts 永久跳过 Writer
+    control.trigger_clarifier_revision = False
     return {
         "dynamic_ltm": new_dynamic_ltm,
         "ltm_archive": [snapshot],
@@ -561,7 +610,11 @@ def milestone_reviewer_1_node(state: GraphState, runtime: AgentRuntime | None = 
     control = _control(state)
     dynamic_ltm = _dynamic_ltm(state)
 
-    # 先做一次硬性校验：空字段或符号闭环失败直接拒绝
+    # 硬性校验：只检查非空，完全移除 validate_dynamic_ltm 调用
+    # 理由：
+    # 1. validate_dynamic_ltm 已降级为软警告（仅符号查重，见 validation.py）
+    # 2. Clarifier 已尽力修复，milestone 用同一规则再判只会死循环
+    # 3. 真正的符号一致性由 Coder 执行反馈 + LLM 语义审查保证
     hard_issues: list[str] = []
     if not dynamic_ltm.assumptions:
         hard_issues.append("假设列表为空。")
@@ -571,10 +624,9 @@ def milestone_reviewer_1_node(state: GraphState, runtime: AgentRuntime | None = 
         hard_issues.append("公式列表为空。")
     if not dynamic_ltm.objective:
         hard_issues.append("目标函数/优化目标为空。")
-    validation_errors = validate_dynamic_ltm(dynamic_ltm)
-    hard_issues.extend(validation_errors)
 
     if hard_issues:
+        control.modeling_revision_count += 1
         control.phase = "milestone_review_1_rejected"
         control.need_rebrainstorm = True
         control.rebrainstorm_feedback.extend(hard_issues)
@@ -586,6 +638,7 @@ def milestone_reviewer_1_node(state: GraphState, runtime: AgentRuntime | None = 
             "milestone_reviewer_1", state, MilestoneReviewer1Response, system_prompt=system_prompt
         )
         if not response.approval:
+            control.modeling_revision_count += 1
             control.phase = "milestone_review_1_rejected"
             control.need_rebrainstorm = True
             control.rebrainstorm_feedback.extend(response.issues)
@@ -762,78 +815,123 @@ def architect_node(state: GraphState, runtime: AgentRuntime | None = None, confi
 def drawer_node(state: GraphState, runtime: AgentRuntime | None = None, config: dict | None = None) -> GraphState:
     """可视化工程师：生成并执行绘图代码，产出真实图片。
 
-    扩展（视觉洞察回流）：绘图成功后，把 LLM 对图像的文字观察写入 empirical 层，
-    作为 inconclusive 发现（低置信度，需 Reflection 或后续验证才能定性）。
-    这让「画出图后才发现变量关系非线性」的洞察不再丢失。
+    V9 增强：与 coder_node 对称，添加自修复循环（最多 2 次重试，不消耗 budget）。
+    Drawer 失败的主要原因：禁止库 import（lifelines 等）、列名不存在（如 'sex'）、
+    字符串字面量跨行。这些都可以通过把 stderr 回传给 LLM 让其针对性修复。
+
+    V9 修复：代码执行失败时不记录 LLM 想象的"视觉观察"。原逻辑不论代码执行成功与否
+    都会把 response.observation 写入 empirical 层，导致 LLM 虚构的"散点呈凸性趋势"
+    被当作实证证据污染 reflection/clarifier。现在仅在代码执行成功且产出真实图片时
+    才记录视觉观察。
     """
     resolved_runtime = _runtime(runtime)
     control = _control(state)
     empirical = _empirical(state)
 
-    system_prompt, audit = _prompt_audit("drawer", state, runtime)
+    MAX_SELF_REPAIR = 2  # 自修复次数上限（不消耗 budget）
+    recent_stderr = ""
     artifacts = ArtifactBundle()
-    try:
-        response = resolved_runtime.invoke_structured(
-            "drawer", state, DrawerResponse, system_prompt=system_prompt
-        )
-        # 写入真实文件
-        if response.figure_code:
-            resolved_runtime.write_file("figures", "figures.py", content=response.figure_code)
-            # 执行绘图代码，并扫描生成的图片文件
-            success, _stdout, stderr = resolved_runtime.run_code(response.figure_code)
-            if success:
-                figure_dir = Path(resolved_runtime.output_path("figures"))
-                if figure_dir.exists():
-                    figure_files = sorted(
-                        p
-                        for p in figure_dir.iterdir()
-                        if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".pdf", ".svg"}
-                        and p.name not in {"placeholder.png", "figures.py"}
-                    )
-                    artifacts.figure_paths = [str(p) for p in figure_files] or [
-                        resolved_runtime.output_path("figures", "placeholder.png")
-                    ]
-                else:
-                    artifacts.figure_paths = [resolved_runtime.output_path("figures", "placeholder.png")]
-            else:
-                logger.warning("Drawer 绘图代码执行失败: %s", stderr[:200])
-                artifacts.figure_paths = [resolved_runtime.output_path("figures", "placeholder.png")]
-        else:
-            artifacts.figure_paths = [resolved_runtime.output_path("figures", "placeholder.png")]
+    audit: dict[str, str] = {}
 
-        # 视觉洞察回流：把 Drawer 对图像的观察写入 empirical 层
-        # 使用 LLM 自评的 verdict/confidence，而非硬编码 0.5。
-        # 这让「散点明显非线性」这类强信号能直接触发 Clarifier 修正。
-        # 若有 image_stats（客观统计量），附加到 evidence 作为 Reflection 二次确认的依据。
-        if response.observation and response.observation.strip():
-            existing_count = len(empirical.findings)
-            evidence_text = response.observation.strip()
-            if response.image_stats and response.image_stats.strip():
-                evidence_text = f"{evidence_text} | 统计佐证: {response.image_stats.strip()}"
-            empirical.findings.append(EmpiricalFinding(
-                id=f"finding_drawer_{existing_count + 1}",
-                run_id=f"drawer_{control.coder_run_count}",
-                source_node="drawer",
-                assumption_tested="变量关系形态（视觉观察）",
-                evidence=evidence_text,
-                verdict=response.observation_verdict,
-                confidence=response.observation_confidence,
-            ))
-            # 重新派生 refuted/open_questions
-            from modeling_assistant.schemas.state import _rebuild_empirical_derived_fields
-            _rebuild_empirical_derived_fields(empirical)
-            logger.info(
-                "Drawer 视觉观察（verdict=%s, conf=%.2f）：%s",
-                response.observation_verdict,
-                response.observation_confidence,
-                response.observation.strip()[:100],
+    for attempt in range(MAX_SELF_REPAIR + 1):  # 0, 1, 2 = 共 3 次机会
+        # 渲染 prompt：自修复时注入 recent_stderr 让 drawer 看到完整错误
+        extra = {"recent_stderr": recent_stderr} if recent_stderr else None
+        system_prompt, audit = _prompt_audit("drawer", state, runtime, extra=extra)
+
+        try:
+            response = resolved_runtime.invoke_structured(
+                "drawer", state, DrawerResponse, system_prompt=system_prompt
             )
-    except Exception as exc:
-        logger.error("Drawer LLM 调用失败: %s", exc)
-        artifacts.figure_paths = [resolved_runtime.output_path("figures", "placeholder.png")]
+        except Exception as exc:
+            logger.error("Drawer LLM 调用失败: %s", exc)
+            artifacts.figure_paths = [resolved_runtime.output_path("figures", "placeholder.png")]
+            return {"artifacts": artifacts, "empirical": empirical, "prompt_audit": audit}
 
-    control.phase = "figures_ready"
-    return {"artifacts": artifacts, "control": control, "empirical": empirical, "prompt_audit": audit}
+        if not response.figure_code:
+            # LLM 未返回绘图代码，不可自修复
+            artifacts.figure_paths = [resolved_runtime.output_path("figures", "placeholder.png")]
+            return {"artifacts": artifacts, "empirical": empirical, "prompt_audit": audit}
+
+        resolved_runtime.write_file("figures", "figures.py", content=response.figure_code)
+        # V11.2 修复（Bug 1）：预先创建 figures 目录，避免 LLM 忘记 os.makedirs 时
+        # plt.savefig('figures/figure1.png') 因目录不存在而失败
+        Path(resolved_runtime.output_path("figures")).mkdir(parents=True, exist_ok=True)
+        # 执行绘图代码（run_code 内部会先做预检：ast.parse + 禁止库扫描）
+        success, _stdout, stderr = resolved_runtime.run_code(response.figure_code)
+
+        if success:
+            figure_dir = Path(resolved_runtime.output_path("figures"))
+            real_figures: list[str] = []
+            if figure_dir.exists():
+                figure_files = sorted(
+                    p
+                    for p in figure_dir.iterdir()
+                    if p.suffix.lower() in {".png", ".jpg", ".jpeg", ".pdf", ".svg"}
+                    and p.name not in {"placeholder.png", "figures.py"}
+                )
+                real_figures = [str(p) for p in figure_files]
+            if real_figures:
+                # 成功！产出真实图片
+                artifacts.figure_paths = real_figures
+                # V9 修复：仅在代码执行成功且产出真实图片时才记录视觉观察
+                # 避免代码失败时 LLM 虚构的"散点呈凸性趋势"被当作实证证据
+                if response.observation and response.observation.strip():
+                    existing_count = len(empirical.findings)
+                    evidence_text = response.observation.strip()
+                    if response.image_stats and response.image_stats.strip():
+                        evidence_text = f"{evidence_text} | 统计佐证: {response.image_stats.strip()}"
+                    empirical.findings.append(EmpiricalFinding(
+                        id=f"finding_drawer_{existing_count + 1}",
+                        run_id=f"drawer_{control.coder_run_count}",
+                        source_node="drawer",
+                        assumption_tested="变量关系形态（视觉观察）",
+                        evidence=evidence_text,
+                        verdict=response.observation_verdict,
+                        confidence=response.observation_confidence,
+                    ))
+                    from modeling_assistant.schemas.state import _rebuild_empirical_derived_fields
+                    _rebuild_empirical_derived_fields(empirical)
+                    logger.info(
+                        "Drawer 视觉观察（verdict=%s, conf=%.2f）：%s",
+                        response.observation_verdict,
+                        response.observation_confidence,
+                        response.observation.strip()[:100],
+                    )
+                if attempt > 0:
+                    logger.info("Drawer 自修复第 %d 次尝试成功", attempt)
+                return {"artifacts": artifacts, "empirical": empirical, "prompt_audit": audit}
+            # 代码执行成功但未生成图片，可自修复
+            # V11.2 修复（Bug 1）：原提示让 LLM 保存到"当前工作目录"，
+            # 但实际检测的是 figures/ 子目录，导致 LLM 困惑。改为明确要求
+            # 保存到 figures/ 子目录。
+            recent_stderr = (
+                f"代码执行成功但未在 figures/ 子目录下生成图片文件。\n"
+                f"必须使用 plt.savefig('figures/figure1.png')（注意要带 figures/ 前缀），\n"
+                f"并在保存前执行 os.makedirs('figures', exist_ok=True)。\n"
+                f"不要使用 plt.savefig('figure1.png')（缺 figures/ 前缀会被检测到根目录），\n"
+                f"也不要使用绝对路径或 ./figures/ 前缀。\n"
+                f"期望在 {figure_dir} 下找到 .png/.jpg/.pdf 文件。"
+            )
+        else:
+            # 执行失败，记录 stderr 用于自修复
+            recent_stderr = stderr
+            logger.warning("Drawer 绘图代码执行失败 (attempt %d): %s", attempt, stderr[:200])
+
+        # 尝试自修复
+        if attempt < MAX_SELF_REPAIR:
+            logger.info(
+                "Drawer 自修复尝试 %d/%d: %s",
+                attempt + 1, MAX_SELF_REPAIR, recent_stderr[:200],
+            )
+            continue
+
+        # 自修复耗尽，使用 placeholder
+        artifacts.figure_paths = [resolved_runtime.output_path("figures", "placeholder.png")]
+        return {"artifacts": artifacts, "empirical": empirical, "prompt_audit": audit}
+
+    # 不应到达此处，但保险起见
+    artifacts.figure_paths = [resolved_runtime.output_path("figures", "placeholder.png")]
+    return {"artifacts": artifacts, "empirical": empirical, "prompt_audit": audit}
 
 
 def coder_node(state: GraphState, runtime: AgentRuntime | None = None, config: dict | None = None) -> GraphState:
@@ -845,6 +943,10 @@ def coder_node(state: GraphState, runtime: AgentRuntime | None = None, config: d
 
     注意：LLM 调用失败、返回空代码、代码执行失败均视为一次失败。
 
+    V8 增强：代码执行前做预检（ast.parse + 禁止库扫描），失败直接自修复重试，
+    不消耗 budget。执行失败也进入自修复循环（最多 2 次），把完整 stderr 回传给
+    coder 让其针对性修复。自修复仍失败才走原失败路径（消耗 budget）。
+
     实证证据落盘：每次执行（无论成败）都把 stdout/stderr 落盘到
     outputs/logs/run_{n}.log，供 Reflection 节点按需读取。失败日志
     摘要结构化为「[run_id] summary (log_path)」，避免 500 字符截断丢信息。
@@ -852,14 +954,55 @@ def coder_node(state: GraphState, runtime: AgentRuntime | None = None, config: d
     resolved_runtime = _runtime(runtime)
     control = _control(state)
 
-    system_prompt, audit = _prompt_audit("coder", state, runtime)
+    # 提取真实数据路径，供代码执行时使用
+    static_ltm = _static_ltm(state)
+    data_paths = (
+        static_ltm.data_profile.file_paths
+        if static_ltm.data_profile
+        else []
+    )
+
+    MAX_SELF_REPAIR = 2  # 自修复次数上限（不消耗 budget）
+    recent_stderr = ""
     artifacts = ArtifactBundle()
-    try:
-        response = resolved_runtime.invoke_structured(
-            "coder", state, CoderResponse, system_prompt=system_prompt
-        )
+    audit: dict[str, str] = {}
+
+    for attempt in range(MAX_SELF_REPAIR + 1):  # 0, 1, 2 = 共 3 次机会
+        # 渲染 prompt：自修复时注入 recent_stderr 让 coder 看到完整错误
+        extra = {"recent_stderr": recent_stderr} if recent_stderr else None
+        system_prompt, audit = _prompt_audit("coder", state, runtime, extra=extra)
+
+        try:
+            # V11.4：传入 fallback_parser，处理 LLM 偶发返回纯代码块的情况
+            from modeling_assistant.agents.runtime import _coder_fallback_parser
+            response = resolved_runtime.invoke_structured(
+                "coder", state, CoderResponse,
+                system_prompt=system_prompt,
+                fallback_parser=_coder_fallback_parser,
+            )
+        except Exception as exc:
+            # LLM 调用失败，不可自修复，直接走失败路径
+            logger.error("Coder LLM 调用失败: %s", exc)
+            run_id = f"run_{control.coder_run_count}"
+            log_path = resolved_runtime.write_file(
+                "logs", f"{run_id}_llm_error.log",
+                content=f"=== RUN {run_id} (LLM CALL FAILED) ===\n{exc}\n",
+            )
+            control.coder_run_count += 1
+            control.coder_error_count += 1
+            control.coder_error_log.append(
+                f"[{run_id}] LLM 调用失败: {str(exc)[:200]} (日志: {log_path})"
+            )
+            control.phase = "code_generation_failed"
+            control.coder_rollback_target = "architect"
+            # V9 修复：清空旧 result_paths，避免 merge_artifacts_reducer 保留旧值
+            # 导致 route_after_coder 误判为成功 → result_reviewer 检查旧文件 → 死循环
+            artifacts.result_paths = []
+            artifacts.clear_result_paths = True
+            return {"artifacts": artifacts, "control": control, "prompt_audit": audit}
+
         if not response.code:
-            # LLM 未返回代码，视为一次失败
+            # LLM 未返回代码，不可自修复，直接走失败路径
             control.coder_error_count += 1
             run_id = f"run_{control.coder_run_count}"
             log_path = resolved_runtime.output_path("logs", f"{run_id}_empty.log")
@@ -867,111 +1010,155 @@ def coder_node(state: GraphState, runtime: AgentRuntime | None = None, config: d
             control.coder_run_count += 1
             control.phase = "code_generation_empty"
             control.coder_rollback_target = "architect"
+            logger.warning("Coder 未生成代码 (第 %d 次)。", control.coder_error_count)
+            # V9 修复：清空旧 result_paths（同上）
+            artifacts.result_paths = []
+            artifacts.clear_result_paths = True
+            return {"artifacts": artifacts, "control": control, "prompt_audit": audit}
+
+        # V11 修复：第三层常量校验 —— 在执行代码前做静态扫描
+        # 如果发现关键常量缺失或列名错误，直接进入自修复循环，不消耗 budget
+        from modeling_assistant.validation.constants import check_code_against_facts
+        constant_issues = check_code_against_facts(response.code, static_ltm, artifacts)
+        if constant_issues:
+            run_id = f"run_{control.coder_run_count}"
+            issues_text = "\n".join(constant_issues)
             logger.warning(
-                "Coder 未生成代码 (第 %d 次)。",
-                control.coder_error_count,
+                "Coder 常量校验失败 (attempt %d, run_id=%s): %s",
+                attempt, run_id, issues_text[:200],
+            )
+            # 把校验问题作为 stderr 回传给 Coder 自修复
+            recent_stderr = (
+                f"【V11 常量校验失败】\n{issues_text}\n"
+                f"请根据 problem_facts 列表修正代码中的数值常量，"
+                f"或根据 data_columns_json 修正列名访问。"
+            )
+            control.coder_error_log.append(f"[{run_id}_precheck] 常量校验: {issues_text[:200]}")
+            if attempt < MAX_SELF_REPAIR:
+                continue
+            # V11.2 修复（Bug 3）：自修复耗尽时写 precheck 日志文件，
+            # 让 reflection_node 能找到日志并消费 budget，避免死循环。
+            # 原逻辑只写内存 coder_error_log，reflection 找不到日志文件而跳过，
+            # budget 不增加，route_after_reflection 看到 result_paths 空 + budget 未耗尽
+            # 会无限回退到 architect。
+            precheck_log_path = resolved_runtime.write_file(
+                "logs", f"{run_id}_precheck.log",
+                content=(
+                    f"=== RUN {run_id} (PRECHECK FAILED) ===\n"
+                    f"=== CONSTANT ISSUES ===\n{issues_text}\n"
+                    f"=== CODE ===\n{response.code}\n"
+                ),
+            )
+            control.coder_error_count += 1
+            control.coder_run_count += 1
+            # 使用独立 phase，与执行失败区分，便于调试
+            control.phase = "code_precheck_failed"
+            control.coder_rollback_target = "architect"
+            control.coder_error_log.append(
+                f"[{run_id}] 常量校验失败 (日志: {precheck_log_path})"
             )
             artifacts.result_paths = []
-        else:
-            resolved_runtime.write_file("results", "model.py", content=response.code)
+            artifacts.clear_result_paths = True
+            return {"artifacts": artifacts, "control": control, "prompt_audit": audit}
 
-            # 提取真实数据路径，供代码执行时使用
-            static_ltm = _static_ltm(state)
-            data_paths = (
-                static_ltm.data_profile.file_paths
-                if static_ltm.data_profile
-                else []
-            )
+        resolved_runtime.write_file("results", "model.py", content=response.code)
 
-            # 实际执行代码，并传入真实数据路径
-            success, stdout, stderr = resolved_runtime.run_code(
-                response.code, data_paths=data_paths
-            )
-            if success:
-                result_path_str = response.result_path or "results/output.csv"
-                expected_path = Path(result_path_str)
-                # LLM 返回的 result_path 约定为相对于 output_dir 的相对路径
-                if not expected_path.is_absolute():
-                    expected_path = resolved_runtime.settings.output_dir / expected_path
-                if expected_path.exists():
-                    # 落盘 stdout/stderr 供 Reflection 节点读取
-                    run_id = f"run_{control.coder_run_count}"
-                    log_path = resolved_runtime.write_file(
-                        "logs", f"{run_id}.log",
-                        content=(
-                            f"=== RUN {run_id} (SUCCESS) ===\n"
-                            f"=== STDOUT ===\n{stdout}\n"
-                            f"=== STDERR ===\n{stderr}\n"
-                            f"=== RESULT ===\n{expected_path}\n"
-                        ),
-                    )
-                    control.coder_run_count += 1
-                    control.coder_error_count = 0
-                    control.coder_error_log = []
-                    control.phase = "code_executed_successfully"
-                    artifacts.result_paths = [str(expected_path)]
-                else:
-                    run_id = f"run_{control.coder_run_count}"
-                    log_path = resolved_runtime.write_file(
-                        "logs", f"{run_id}_missing.log",
-                        content=(
-                            f"=== RUN {run_id} (RESULT MISSING) ===\n"
-                            f"=== STDOUT ===\n{stdout}\n"
-                            f"=== STDERR ===\n{stderr}\n"
-                            f"expected: {expected_path}\n"
-                        ),
-                    )
-                    control.coder_run_count += 1
-                    control.coder_error_count += 1
-                    control.coder_error_log.append(
-                        f"[{run_id}] 代码执行成功但未找到结果文件：{expected_path} (日志: {log_path})"
-                    )
-                    control.phase = "code_result_missing"
-                    control.coder_rollback_target = "architect"
-                    artifacts.result_paths = []
-            else:
+        # 执行代码（run_code 内部会先做预检：ast.parse + 禁止库扫描）
+        success, stdout, stderr = resolved_runtime.run_code(
+            response.code, data_paths=data_paths
+        )
+
+        if success:
+            result_path_str = response.result_path or "results/output.csv"
+            expected_path = Path(result_path_str)
+            if not expected_path.is_absolute():
+                expected_path = resolved_runtime.settings.output_dir / expected_path
+            if expected_path.exists():
                 run_id = f"run_{control.coder_run_count}"
+                # V10 修复：备份成功结果文件，避免被后续失败的 Coder 覆盖
+                # 当 ResultReviewer 拒绝时，原 output.csv 会被清空（V9 行为），但磁盘上的
+                # output_run_N.csv 备份保留。writer_node 在 result_paths 为空时可扫描备份
+                # 目录加载最新的成功结果，让论文基于真实数值而非降级到"待验证"。
+                try:
+                    backup_path = expected_path.parent / f"output_{run_id}.csv"
+                    shutil.copy2(expected_path, backup_path)
+                    logger.info("Coder 成功结果已备份至 %s", backup_path)
+                except Exception as exc:
+                    logger.warning("备份结果文件失败 %s: %s", expected_path, exc)
                 log_path = resolved_runtime.write_file(
-                    "logs", f"{run_id}_error.log",
+                    "logs", f"{run_id}.log",
                     content=(
-                        f"=== RUN {run_id} (FAILED) ===\n"
-                        f"=== STDERR ===\n{stderr}\n"
+                        f"=== RUN {run_id} (SUCCESS) ===\n"
                         f"=== STDOUT ===\n{stdout}\n"
+                        f"=== STDERR ===\n{stderr}\n"
+                        f"=== RESULT ===\n{expected_path}\n"
                     ),
                 )
                 control.coder_run_count += 1
-                control.coder_error_count += 1
-                # 结构化摘要：[run_id] summary (log_path)，便于按需调取完整日志
-                summary = _extract_error_summary(stderr)
-                control.coder_error_log.append(f"[{run_id}] {summary} (日志: {log_path})")
-                control.phase = "code_execution_failed"
-                # 按错误类型判定回滚目标
-                control.coder_rollback_target = _classify_coder_error(stderr)
-                logger.warning(
-                    "Coder 代码执行失败 (第 %d 次), 回滚目标=%s: %s",
-                    control.coder_error_count,
-                    control.coder_rollback_target,
-                    stderr[:200],
-                )
-                artifacts.result_paths = []
-    except Exception as exc:
-        logger.error("Coder LLM 调用失败: %s", exc)
-        run_id = f"run_{control.coder_run_count}"
-        log_path = resolved_runtime.write_file(
-            "logs", f"{run_id}_llm_error.log",
-            content=f"=== RUN {run_id} (LLM CALL FAILED) ===\n{exc}\n",
-        )
-        control.coder_run_count += 1
-        control.coder_error_count += 1
-        control.coder_error_log.append(
-            f"[{run_id}] LLM 调用失败: {str(exc)[:200]} (日志: {log_path})"
-        )
-        control.phase = "code_generation_failed"
-        control.coder_rollback_target = "architect"
-        # LLM 调用失败时不应虚构结果路径，否则 ResultReviewer 会检测到文件不存在
-        # 并触发无意义的回退循环。
-        artifacts.result_paths = []
+                control.coder_error_count = 0
+                control.coder_error_log = []
+                control.phase = "code_executed_successfully"
+                artifacts.result_paths = [str(expected_path)]
+                if attempt > 0:
+                    logger.info("Coder 自修复第 %d 次尝试成功", attempt)
+                return {"artifacts": artifacts, "control": control, "prompt_audit": audit}
+            # 结果文件缺失，可自修复
+            run_id = f"run_{control.coder_run_count}"
+            log_path = resolved_runtime.write_file(
+                "logs", f"{run_id}_missing.log",
+                content=(
+                    f"=== RUN {run_id} (RESULT MISSING) ===\n"
+                    f"=== STDOUT ===\n{stdout}\n"
+                    f"=== STDERR ===\n{stderr}\n"
+                    f"expected: {expected_path}\n"
+                ),
+            )
+            control.coder_run_count += 1
+            summary = _extract_error_summary(stderr or f"结果文件缺失：{expected_path}")
+            control.coder_error_log.append(f"[{run_id}] {summary} (日志: {log_path})")
+            recent_stderr = f"代码执行成功但未找到结果文件：{expected_path}\n请检查 RESULT_PATH 是否正确指向 MODELING_OUTPUT_DIR/results/output.csv"
+        else:
+            # 执行失败，记录日志（不消耗 budget，用于自修复）
+            run_id = f"run_{control.coder_run_count}"
+            log_path = resolved_runtime.write_file(
+                "logs", f"{run_id}_error.log",
+                content=(
+                    f"=== RUN {run_id} (FAILED) ===\n"
+                    f"=== STDERR ===\n{stderr}\n"
+                    f"=== STDOUT ===\n{stdout}\n"
+                ),
+            )
+            control.coder_run_count += 1
+            summary = _extract_error_summary(stderr)
+            control.coder_error_log.append(f"[{run_id}] {summary} (日志: {log_path})")
+            recent_stderr = stderr
 
+        # 尝试自修复
+        if attempt < MAX_SELF_REPAIR:
+            logger.info(
+                "Coder 自修复尝试 %d/%d (run_id=%s): %s",
+                attempt + 1, MAX_SELF_REPAIR, run_id, recent_stderr[:200],
+            )
+            continue
+
+        # 自修复耗尽，走原失败路径（消耗 budget）
+        control.coder_error_count += 1
+        control.phase = "code_execution_failed"
+        control.coder_rollback_target = _classify_coder_error(recent_stderr)
+        logger.warning(
+            "Coder 代码执行失败 (第 %d 次, 自修复耗尽), 回滚目标=%s: %s",
+            control.coder_error_count,
+            control.coder_rollback_target,
+            recent_stderr[:200],
+        )
+        # V9 修复：清空旧 result_paths（同上）
+        artifacts.result_paths = []
+        artifacts.clear_result_paths = True
+        return {"artifacts": artifacts, "control": control, "prompt_audit": audit}
+
+    # 不应到达此处，但保险起见
+    artifacts.result_paths = []
+    artifacts.clear_result_paths = True
     return {"artifacts": artifacts, "control": control, "prompt_audit": audit}
 
 
@@ -994,31 +1181,63 @@ def reflection_node(state: GraphState, runtime: AgentRuntime | None = None, conf
     resolved_runtime = _runtime(runtime)
     control = _control(state)
     empirical = _empirical(state)
+    artifacts_in = _artifacts(state)
 
     # 注意：不重置 trigger_clarifier_revision。ResultReviewer 可能已经设置过。
     # Reflection 只能在「上游未触发修正 + 自己新发现 refuted + 预算有剩余」时追加触发。
 
-    # 读取最近一次 Coder 成功执行的日志
+    # V6 修复：读取 result_paths，用于判断 coder 是否失败
+    result_paths_empty = not artifacts_in.result_paths
+
+    # 读取最近一次 Coder 执行的日志（兼容成功与失败日志）
     # coder_run_count 已在落盘后自增，所以最近一次的 run_id 是 run_{count-1}
     last_run_idx = max(control.coder_run_count - 1, 0)
     run_id = f"run_{last_run_idx}"
-    log_path = Path(resolved_runtime.output_path("logs", f"{run_id}.log"))
+    # 按优先级查找：成功日志 > 各种失败日志
+    log_candidates = [
+        (f"{run_id}.log", "success"),           # 成功
+        (f"{run_id}_error.log", "failed"),      # 代码执行失败
+        (f"{run_id}_missing.log", "result_missing"),  # 结果文件缺失
+        (f"{run_id}_empty.log", "empty_code"),  # LLM 未生成代码
+        (f"{run_id}_llm_error.log", "llm_failed"),  # LLM 调用失败
+        (f"{run_id}_precheck.log", "precheck_failed"),  # V11.2: 常量校验失败
+    ]
+    log_path: Path | None = None
+    execution_status = "unknown"
+    for candidate, status in log_candidates:
+        candidate_path = Path(resolved_runtime.output_path("logs", candidate))
+        if candidate_path.exists():
+            log_path = candidate_path
+            execution_status = status
+            break
 
-    if not log_path.exists():
-        # 最近一次没有成功日志（可能是失败路径过来的），跳过反思
-        control.phase = "reflection_skipped"
+    if log_path is None:
+        # V11.2 修复（Bug 3 兜底）：找不到任何日志（不应发生，但保险），
+        # 必须消费 budget，避免 route_after_reflection 看到 budget 未耗尽而
+        # 无限回退到 architect 导致死循环。
+        logger.warning(
+            "Reflection 找不到任何 Coder 日志（run_id=%s），消费 budget 兜底",
+            run_id,
+        )
+        if control.modeling_revision_count < control.modeling_revision_budget:
+            control.modeling_revision_count += 1
+        control.phase = "reflection_done"
         return {"control": control, "empirical": empirical}
 
     try:
-        stdout_content = log_path.read_text(encoding="utf-8")
+        raw_content = log_path.read_text(encoding="utf-8")
     except Exception as exc:
         logger.warning("Reflection 读取日志失败 %s: %s", log_path, exc)
         control.phase = "reflection_skipped"
         return {"control": control, "empirical": empirical}
 
-    if not stdout_content.strip():
+    if not raw_content.strip():
         control.phase = "reflection_skipped"
         return {"control": control, "empirical": empirical}
+
+    # 在内容前加状态标记，让 LLM 知道这是失败还是成功执行
+    status_marker = f"=== EXECUTION STATUS: {execution_status.upper()} ===\n"
+    stdout_content = status_marker + raw_content
 
     # 通过 extra 注入 recent_stdout，渲染 reflection prompt
     system_prompt, audit = _prompt_audit(
@@ -1065,18 +1284,31 @@ def reflection_node(state: GraphState, runtime: AgentRuntime | None = None, conf
             and f.confidence >= REFUTED_CONFIDENCE_THRESHOLD
             for f in new_findings
         )
-        if has_refuted and not already_triggered and control.empirical_revision_count < control.empirical_revision_budget:
+        if has_refuted and not already_triggered and control.modeling_revision_count < control.modeling_revision_budget:
             control.trigger_clarifier_revision = True
-            control.empirical_revision_count += 1
+            control.modeling_revision_count += 1
             control.phase = "revision_triggered"
             logger.info(
-                "Reflection 触发 Clarifier 修正（已用 %d/%d 预算）",
-                control.empirical_revision_count,
-                control.empirical_revision_budget,
+                "Reflection 触发 Clarifier 修正（统一预算已用 %d/%d）",
+                control.modeling_revision_count,
+                control.modeling_revision_budget,
             )
         elif already_triggered:
             # 上游 ResultReviewer 已触发修正，保留其决策
             control.phase = "revision_triggered"
+        elif result_paths_empty and not has_refuted:
+            # V6 修复（问题 B）：coder 失败（result_paths 空）+ 无 refuted 发现 + 上游未触发修正
+            # 消费 1 次 budget，让 route_after_reflection 的 budget 检查能正确反映已用预算，
+            # 避免 architect→coder 失败→reflection→回退 architect→coder 失败... 死循环。
+            # budget 未耗尽时 +1；budget 已耗尽时不再 +1（route_after_reflection 会强制前进到 writer）。
+            if control.modeling_revision_count < control.modeling_revision_budget:
+                control.modeling_revision_count += 1
+                logger.info(
+                    "Coder 失败但无 refuted 发现，消费 budget (%d/%d) 以触发回退重试",
+                    control.modeling_revision_count,
+                    control.modeling_revision_budget,
+                )
+            control.phase = "reflection_done"
         else:
             control.phase = "reflection_done"
     except Exception as exc:
@@ -1165,9 +1397,98 @@ def _compile_latex_to_pdf(tex_path: Path, work_dir: Path) -> Path | None:
 def writer_node(state: GraphState, runtime: AgentRuntime | None = None, config: dict | None = None) -> GraphState:
     resolved_runtime = _runtime(runtime)
     control = _control(state)
+    dynamic_ltm = _dynamic_ltm(state)
+    artifacts_in = _artifacts(state)
 
-    system_prompt, audit = _prompt_audit("writer", state, runtime)
+    # V10 修复：当 result_paths 为空时，扫描 results 目录下的 output_run_*.csv 备份
+    # 这避免了"Coder 曾经成功产出真实结果，但被后续失败覆盖"导致的降级。
+    # 备份是 Coder 成功执行时由 coder_node 写入的（output_run_N.csv），即使后续
+    # ResultReviewer 拒绝了当前 result_paths，磁盘上的备份仍保留真实数值。
+    using_backup_results = False
+    if not artifacts_in.result_paths:
+        results_dir = Path(resolved_runtime.output_path("results"))
+        if results_dir.exists():
+            # 扫描所有 output_run_*.csv 备份，按 run_id 排序取最新（编号最大）的一个
+            backup_files = sorted(
+                results_dir.glob("output_run_*.csv"),
+                key=lambda p: int(p.stem.split("_")[-1]) if p.stem.split("_")[-1].isdigit() else 0,
+            )
+            # 过滤掉空文件（仅含注释行或字节数过小）
+            valid_backups = [
+                p for p in backup_files
+                if p.stat().st_size > 20  # 至少 20 字节，过滤只有注释的空文件
+            ]
+            if valid_backups:
+                latest_backup = valid_backups[-1]
+                artifacts_in.result_paths = [str(latest_backup)]
+                using_backup_results = True
+                logger.info(
+                    "Writer 加载历史成功结果备份：%s（当前 result_paths 为空，使用最新备份避免降级）",
+                    latest_backup,
+                )
+
+    # 前置完整性检查：检测关键产物是否缺失
+    integrity_warnings: list[str] = []
+    if not dynamic_ltm.objective:
+        integrity_warnings.append("动态 LTM 的 objective 为空：建模目标未确定，论文不得编造具体目标与结果。")
+    if not dynamic_ltm.assumptions:
+        integrity_warnings.append("动态 LTM 的 assumptions 为空：建模假设未确定，论文不得编造假设。")
+    if not dynamic_ltm.equations:
+        integrity_warnings.append("动态 LTM 的 equations 为空：核心方程未确定，论文不得编造公式。")
+    if not artifacts_in.result_paths:
+        integrity_warnings.append("result_paths 为空：Coder 未产出任何数值结果。论文中所有数值结果必须标注为「待验证」或「理论推导」，不得声称为已计算的结果。")
+    elif using_backup_results:
+        # V10 修复：使用备份结果时，标注警告但允许 writer 基于真实数值生成论文
+        integrity_warnings.append(
+            f"result_paths 来自历史成功备份（{artifacts_in.result_paths[0]}）：当前会话 ResultReviewer 拒绝了最新结果，"
+            f"但 Coder 此前成功产出过真实数值。论文可基于该备份结果撰写，但需在论文中标注「结果来自历史执行备份，未经最新验证」。"
+        )
+    # 只有当 figure_paths 全部是 placeholder 或为空时才警告。
+    # 如果含真实图片（非 placeholder），即使历史失败残留了 placeholder 也不警告，
+    # 因为 writer 可以引用真实图片。
+    real_figures = [p for p in artifacts_in.figure_paths if "placeholder" not in p.lower()]
+    if not real_figures:
+        integrity_warnings.append("figure_paths 全为占位图或为空：图表未真正生成。论文中不得声称「如图所示」并引用具体图表。")
+
+    integrity_text = "\n".join(f"- {w}" for w in integrity_warnings) if integrity_warnings else "无（所有关键产物完整）"
+
+    # V10 修复：读取 result_paths 中的 CSV 内容（前 50 行）注入到 writer prompt
+    # 让 writer 能直接引用真实数值而非编造。仅在 result_paths 非空时注入。
+    result_preview = ""
+    if artifacts_in.result_paths:
+        try:
+            import pandas as pd
+            for path_str in artifacts_in.result_paths:
+                path = Path(path_str)
+                if path.exists() and path.suffix.lower() in (".csv", ".xlsx", ".xls"):
+                    df = pd.read_csv(path) if path.suffix.lower() == ".csv" else pd.read_excel(path)
+                    preview_lines = []
+                    preview_lines.append(f"=== 结果文件 {path} ===")
+                    preview_lines.append(f"形状: {df.shape[0]} 行 × {df.shape[1]} 列")
+                    preview_lines.append(f"列名: {list(df.columns)}")
+                    preview_lines.append("前 50 行数据：")
+                    preview_lines.append(df.head(50).to_string())
+                    # 数值列统计摘要
+                    numeric_df = df.select_dtypes(include=["number"])
+                    if not numeric_df.empty:
+                        preview_lines.append("\n数值列统计摘要：")
+                        preview_lines.append(numeric_df.describe().to_string())
+                    result_preview = "\n".join(preview_lines)[:5000]  # 截断到 5000 字符
+                    break  # 只读第一个结果文件
+        except Exception as exc:
+            logger.warning("Writer 读取结果文件预览失败: %s", exc)
+            result_preview = ""
+
+    extra = {"integrity_warnings": integrity_text}
+    if result_preview:
+        extra["result_preview"] = result_preview
+
+    system_prompt, audit = _prompt_audit(
+        "writer", state, runtime, extra=extra
+    )
     artifacts = ArtifactBundle()
+    # V10 修复：保留 result_paths（含备份路径）传给 writer，让 writer 引用真实数值
+    artifacts.result_paths = list(artifacts_in.result_paths)
     try:
         response = resolved_runtime.invoke_structured(
             "writer", state, WriterResponse, system_prompt=system_prompt

@@ -16,14 +16,19 @@ def test_validate_clean_ltm_passes():
 
 
 def test_validate_undefined_symbol_in_equation():
-    """公式引用了未定义符号 → 报错。"""
+    """公式闭环校验已移除：公式引用未定义符号不再报错。
+
+    设计理由：数学建模公式天然含向量分量(P_M)、下标(M0)、自定义函数(cover)等，
+    穷举定义不可能，硬校验误判率极高（实测导致死循环）。
+    真正的符号一致性由 Coder 执行反馈 + milestone LLM 语义审查保证。
+    """
     ltm = DynamicLTM(
         nomenclature={"x": "自变量"},
         equations=["y = 2 * x + 1"],  # y 未在 nomenclature 中定义
         objective="最小化 y",
     )
     errors = validate_dynamic_ltm(ltm)
-    assert any("y" in err for err in errors)
+    assert errors == []  # 公式闭环校验已移除，不再报错
 
 
 def test_validate_duplicate_descriptions():
@@ -41,18 +46,15 @@ def test_validate_duplicate_descriptions():
 
 
 def test_validate_math_functions_are_reserved():
-    """数学函数（sin、cos、log 等）不应被视为未定义符号。"""
+    """公式闭环校验已移除：数学函数（sin、cos 等）自然不会被视为未定义符号。"""
     ltm = DynamicLTM(
-        nomenclature={"x": "自变量", "y": "因变量"},  # y 也定义，避免误报
+        nomenclature={"x": "自变量", "y": "因变量"},
         equations=["y = sin(x) + cos(x)"],
         objective="最小化 y",
     )
     errors = validate_dynamic_ltm(ltm)
-    # sin/cos 是保留字，不应出现在错误信息中
-    joined = " ".join(errors)
-    assert "sin" not in joined.replace("sin(x)", "")  # 排除方程文本中的 sin
-    assert "cos" not in joined.replace("cos(x)", "")
-    assert errors == []  # x、y 都已定义，sin/cos 是保留字 → 无错误
+    # 公式闭环校验已移除，不再检查公式中的符号 → 无错误
+    assert errors == []
 
 
 def test_validate_empty_ltm_passes():

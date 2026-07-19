@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import logging
 import os
 import re
@@ -25,6 +26,62 @@ from modeling_assistant.schemas.state import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+# 禁止导入的库（未保证安装），与 coder.md/architect.md 约束一致
+FORBIDDEN_IMPORTS = {
+    "xgboost", "lightgbm", "imblearn", "shap", "lifelines",
+    "pymer4", "seaborn", "plotly", "bokeh", "arviz",
+    "torch", "tensorflow", "keras", "catboost", "statsmodels",
+}
+# statsmodels 实际已安装，但常被误用做高级模型；允许使用，从禁止列表移除
+FORBIDDEN_IMPORTS.discard("statsmodels")
+
+
+def precheck_code(code: str) -> str:
+    """代码预检：语法检查 + 禁止库扫描。
+
+    在执行代码前做轻量检查，避免明显错误浪费执行时间。
+    返回空字符串表示通过，返回非空字符串表示错误信息（模拟 stderr 格式）。
+    """
+    # 1. 语法检查（ast.parse）
+    try:
+        tree = ast.parse(code)
+    except SyntaxError as e:
+        return (
+            f"SyntaxError（预检拦截）: {e.msg} (line {e.lineno} col {e.offset})\n"
+            f"请检查字符串字面量是否跨行、括号是否匹配、是否有非法字符。\n"
+            f"完整 traceback:\n{e}"
+        )
+
+    # 2. 扫描 import 语句，发现禁止库
+    forbidden_found: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                top_module = alias.name.split(".")[0]
+                if top_module in FORBIDDEN_IMPORTS:
+                    forbidden_found.append(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                top_module = node.module.split(".")[0]
+                if top_module in FORBIDDEN_IMPORTS:
+                    forbidden_found.append(node.module)
+
+    if forbidden_found:
+        libs = ", ".join(sorted(set(forbidden_found)))
+        return (
+            f"ModuleNotFoundError（预检拦截）: 以下库未安装: {libs}\n"
+            f"允许的库：numpy, pandas, scipy, sklearn, statsmodels, matplotlib, networkx, pulp\n"
+            f"替代方案：\n"
+            f"- xgboost/lightgbm → sklearn.ensemble.GradientBoostingClassifier/Regressor\n"
+            f"- imblearn → sklearn.utils.resample 或 class_weight 参数\n"
+            f"- shap → sklearn 内置 feature_importances_ 属性\n"
+            f"- seaborn/plotly → matplotlib\n"
+            f"请移除禁止库的 import 并改用替代方案后重试。"
+        )
+
+    return ""
 
 
 @dataclass(slots=True)
@@ -120,8 +177,15 @@ class AgentRuntime:
         response_model: type[BaseModel],
         max_retries: int = 2,
         system_prompt: str | None = None,
+        fallback_parser: callable | None = None,
     ) -> BaseModel:
-        """调用 LLM 并解析为 Pydantic 模型，解析失败时自动重试。"""
+        """调用 LLM 并解析为 Pydantic 模型，解析失败时自动重试。
+
+        V11.4：新增 fallback_parser 参数，用于在 JSON 解析失败时兜底。
+        典型场景：Coder 偶发返回纯 Python 代码块（不带 JSON 包装），
+        fallback_parser 从代码块中提取 code 字段构造 CoderResponse。
+        fallback_parser 只在最后一次重试失败前调用，避免影响正常重试。
+        """
         if system_prompt is None:
             system_prompt = self.render_prompt(prompt_name, state)
         for attempt in range(max_retries + 1):
@@ -130,6 +194,22 @@ class AgentRuntime:
                 json_str = _extract_json(raw)
                 return response_model.model_validate_json(json_str)
             except Exception as exc:
+                # V11.4：最后一次重试失败前，尝试 fallback_parser 兜底
+                if fallback_parser is not None and attempt == max_retries:
+                    try:
+                        fallback_result = fallback_parser(raw)
+                        if fallback_result is not None:
+                            logger.info(
+                                "LLM [%s] JSON 解析失败，fallback 兜底成功",
+                                prompt_name,
+                            )
+                            return fallback_result
+                    except Exception as fallback_exc:
+                        logger.warning(
+                            "LLM [%s] fallback 也失败: %s",
+                            prompt_name,
+                            fallback_exc,
+                        )
                 logger.warning(
                     "LLM [%s] 调用/解析失败 (attempt %d/%d): %s",
                     prompt_name,
@@ -173,6 +253,11 @@ class AgentRuntime:
         如果提供了 data_paths，会把第一个路径通过环境变量 MODELING_DATA_PATH
         传入子进程，并把完整列表通过 MODELING_DATA_PATHS（JSON 数组）传入。
         """
+        # 预检：语法检查 + 禁止库扫描（不消耗 budget，失败直接要求重写）
+        precheck_error = precheck_code(code)
+        if precheck_error:
+            return False, "", precheck_error
+
         with tempfile.NamedTemporaryFile(
             mode="w", suffix=".py", delete=False, encoding="utf-8"
         ) as f:
@@ -180,7 +265,13 @@ class AgentRuntime:
             script_path = f.name
 
         env = os.environ.copy()
-        env["MODELING_OUTPUT_DIR"] = str(self.settings.output_dir)
+        # V11.2 修复（Bug 4）：禁用 .pyc 写入，避免 TRAE Sandbox 拦截标准库 __pycache__ 写入
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        # 必须传入绝对路径：子进程 cwd 会被切到 output_dir，若传入相对路径，
+        # Coder 代码中 os.path.join(OUTPUT_DIR, "results", "output.csv") 会在
+        # cwd 下再次嵌套解析，导致结果写到 outputs2/outputs2/results/output.csv
+        # 详见 real_test2 测试报告 Bug B
+        env["MODELING_OUTPUT_DIR"] = str(self.settings.output_dir.resolve())
         if data_paths:
             # cwd 会被切换到 output_dir，子进程中的相对路径将基于此目录解析，
             # 因此必须把数据路径转为绝对路径，避免 'outputs/test_data.csv'
@@ -229,6 +320,33 @@ def _extract_json(text: str) -> str:
         return bracket_match.group(0)
     # 4. 原样返回，让上层抛错
     return text
+
+
+def _coder_fallback_parser(raw: str):
+    """V11.4：Coder 偶发返回纯 Python 代码块（不带 JSON 包装）时的兜底解析。
+
+    场景：LLM 直接返回 ```python\nimport os\n...\n``` 而非 JSON 包装。
+    fallback 提取代码块作为 code 字段构造 CoderResponse。
+
+    加锚定：只匹配"整个返回就是纯代码块"的情况，
+    避免误匹配 JSON 内部的代码块。
+    """
+    if not raw:
+        return None
+    from modeling_assistant.schemas.responses import CoderResponse
+
+    # 加 ^\s* 和 \s*$ 锚定：整个返回必须是纯代码块（前后只允许空白）
+    code_match = re.match(
+        r"^\s*```(?:python)?\n(.*?)```\s*$",
+        raw,
+        re.DOTALL,
+    )
+    if code_match:
+        return CoderResponse(
+            code=code_match.group(1),
+            result_path="results/output.csv",
+        )
+    return None
 
 
 def get_default_runtime() -> AgentRuntime:

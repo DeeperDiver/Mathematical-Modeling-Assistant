@@ -1,0 +1,11 @@
+=== RUN run_1 (SUCCESS) ===
+=== STDOUT ===
+方案已输出到 C:\Users\lingi\Desktop\Research\Mo\Modeling_Assistant\outputs4_v11_4\results\output.csv
+总成本: 0.00 元
+启动成本: 0.00, 能耗成本: 0.00, 碳排放成本: 0.00, 时间窗惩罚: 0.00
+使用车辆数: 0
+
+=== STDERR ===
+
+=== RESULT ===
+outputs4_v11_4\results\output.csv

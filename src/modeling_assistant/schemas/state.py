@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Annotated, Any, Literal, TypedDict
 
 from pydantic import BaseModel, Field
@@ -49,6 +50,10 @@ class ColumnProfile(BaseModel):
     std: float | None = None
     unique_count: int | None = None
     sample_values: list[Any] = Field(default_factory=list)
+    # V11 修复：机器生成的字符串列解析建议
+    # 对于 dtype=text 的列，根据样例值自动推断解析代码（如 '16W' → str.replace('W','').astype(float)）
+    # 该字段由 data_profile_node 自动填充，不可被 LLM 改写
+    parse_hint: str = ""
 
 
 class DataProfile(BaseModel):
@@ -63,6 +68,29 @@ class DataProfile(BaseModel):
     issues: list[str] = Field(default_factory=list)
 
 
+class ProblemFact(BaseModel):
+    """从题目原文机器提取的数值常量。
+
+    V11 三层防线第一层：纯机器提取，不经过 LLM 改写。
+    作为后续 LLM 解释的"真理基准"，用于：
+    - 第二层：Clarifier 写入 dynamic_ltm 时校验是否引用了这些常量
+    - 第三层：Coder 生成代码后扫描代码常量是否与这些值匹配
+    """
+
+    value: float
+    unit: str = ""  # 如 "m/s"、"m"、"s"、"m/s²"
+    context: str = ""  # 提取该数值的原文片段，便于 LLM 消歧
+    # LLM 标注的角色（如 "烟幕下沉速度"、"导弹速度"、"有效遮蔽半径"）
+    # 由 Analyst 填充，机器不强制；但留空时下游会发警告
+    role_hint: str = ""
+    # V11.4：fact 语义类型，由 fact_extractor 用双重判据自动填充
+    # - physical_param：物理量参数（如 "速度 3 m/s"），代码必须以字面量形式出现
+    # - data_range：数据列范围描述（如 "GC 含量正常范围 40%-60%"），
+    #   是数据筛选阈值而非建模参数，代码可不写字面量
+    # - count：纯计数单位（如 "3 枚"、"5 次"），不参与代码常量校验
+    category: Literal["physical_param", "data_range", "count"] = "physical_param"
+
+
 class StaticLTM(BaseModel):
     raw_problem: str = ""
     data_attachments: list[str] = Field(default_factory=list)
@@ -75,6 +103,14 @@ class StaticLTM(BaseModel):
     # 原始字段（raw_problem/data_schema/data_profile）保持不可变语义，
     # data_findings 是追加字段，允许 data_profile_node 等节点追加发现。
     data_findings: list[str] = Field(default_factory=list)
+    # V11 三层防线第一层：机器提取的题目数值常量
+    # 由 fact_extractor_node（纯代码，无 LLM）从 raw_problem 用正则提取，
+    # 不可被 LLM 改写。作为整个流程的"真理基准"。
+    problem_facts: list[ProblemFact] = Field(default_factory=list)
+    # V11 三层防线第一层：LLM 标注后的常量角色映射
+    # 由 Analyst 节点填充（基于 problem_facts 的 context 推断每个数值的语义角色）
+    # 例如：{"3.0": "烟幕下沉速度 m/s", "300.0": "导弹速度 m/s"}
+    fact_role_mapping: dict[str, str] = Field(default_factory=dict)
 
 
 class DynamicLTM(BaseModel):
@@ -115,6 +151,11 @@ class ArtifactBundle(BaseModel):
     result_paths: list[str] = Field(default_factory=list)
     latex_path: str | None = None
     pdf_path: str | None = None
+    # V9 修复：sentinel 标志，节点失败时设为 True，merge_artifacts_reducer 看到后
+    # 清空 base.result_paths。这解决了 merge_artifacts_reducer 的"只追加不清空"问题：
+    # coder/result_reviewer 失败时返回 result_paths=[]，但 reducer 不会清空旧值，
+    # 导致路由错乱（route_after_coder 看到非空 result_paths 误判为成功）。
+    clear_result_paths: bool = False
 
 
 def merge_artifacts_reducer(
@@ -128,9 +169,27 @@ def merge_artifacts_reducer(
         base.outline = incoming.outline
     if incoming.pseudocode:
         base.pseudocode = incoming.pseudocode
+    # 合并 figure_paths：如果 incoming 含真实图片（非 placeholder），
+    # 应移除 base 中的 placeholder，避免历史失败残留污染真实图片列表。
+    # 场景：第一次 drawer 失败返回 [placeholder]，第二次 drawer 成功返回 [figure1.png]，
+    # 合并后应为 [figure1.png] 而非 [placeholder, figure1.png]。
+    incoming_has_real_figure = any(
+        "placeholder" not in Path(p).name.lower() for p in incoming.figure_paths
+    )
+    if incoming_has_real_figure:
+        base.figure_paths = [
+            p for p in base.figure_paths if "placeholder" not in Path(p).name.lower()
+        ]
     for path in incoming.figure_paths:
         if path not in base.figure_paths:
             base.figure_paths.append(path)
+    # V9 修复：incoming 显式请求清空 result_paths（coder/result_reviewer 失败时）
+    # 时，先清空 base.result_paths，再追加 incoming.result_paths（通常为空）。
+    # 这避免了"只追加不清空"导致的路由错乱：
+    # coder 失败返回 [] 但 base 保留旧值 → route_after_coder 误判为成功 →
+    # result_reviewer 检查旧文件 → 失败回退不消费 budget → 死循环。
+    if incoming.clear_result_paths:
+        base.result_paths = []
     for path in incoming.result_paths:
         if path not in base.result_paths:
             base.result_paths.append(path)
@@ -262,6 +321,21 @@ class ControlState(BaseModel):
     trigger_clarifier_revision: bool = False  # Reflection 设置此标志触发回 Clarifier
     empirical_revision_count: int = 0  # 假设被推翻后触发 Clarifier 的已用次数
     empirical_revision_budget: int = 2  # 预算（防止无限循环）
+    # ── 建模阶段统一预算 ──
+    # 覆盖所有回到 mathematician/clarifier 的路径，单一计数避免叠加浪费：
+    #   - need_rebrainstorm（milestone 拒绝 / realist 全剪枝）
+    #   - trigger_clarifier_revision（empirical 触发）
+    #   - coder_rollback_target=clarifier（求解失败）
+    # 预算耗尽后：所有回退路径强制放行到 HITL，由人类决断
+    modeling_revision_count: int = 0
+    modeling_revision_budget: int = 4  # 统一预算（原 empirical=2 + milestone=2 + realist 兜底）
+    # V10 修复：记录 ResultReviewer 最近一次拒绝的具体原因，供 Architect 针对性调整模型设计。
+    # 与 coder_error_log 不同：coder_error_log 混合了 Coder 执行失败和 ResultReviewer 拒绝两类信息，
+    # 而 last_result_review_issues 专门记录"Coder 成功执行但结果质量不通过"的拒绝原因（如常量列、
+    # 边界值、空文件），让 Architect 能区分两类失败并针对性调整：
+    # - Coder 执行失败 → 调整伪代码复杂度/依赖
+    # - ResultReviewer 拒绝 → 调整模型约束（如避免常量列、避免边界值）
+    last_result_review_issues: list[str] = Field(default_factory=list)
 
 
 class GraphState(TypedDict, total=False):
