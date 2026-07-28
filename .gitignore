@@ -7,7 +7,20 @@ __pycache__/
 dist/
 build/
 *.egg-info/
-outputs/
+outputs*/
+
+# IDE / agent 临时目录
+.trae/
+.agents/
+.idea/
+.vscode/
+
+# 运行日志
+*.log
+
+# 模型序列化文件
+*.pkl
+*.joblib
 
 # 敏感信息
 .env
@@ -18,3 +31,8 @@ outputs/
 .smoke_test.py
 test_write.tmp
 *.tmp
+
+# real_test 端到端测试题目与运行脚本
+real_test*/
+real_test.md
+run_real_test*.py

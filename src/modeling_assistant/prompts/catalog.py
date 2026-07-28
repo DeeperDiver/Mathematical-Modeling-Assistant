@@ -39,6 +39,11 @@ class PromptContext:
         coder_error_log_json = "[]"
         coder_error_count = "0"
         last_result_review_issues_json = "[]"
+        # Meta-Router 专用变量默认值
+        modeling_revision_count = "0"
+        modeling_revision_budget = "4"
+        modeling_revision_remaining = "4"
+        selected_plan_json = "{}"
         if self.control is not None:
             ctrl_data = self.control.model_dump()
             feasibility_threshold = str(ctrl_data.get("feasibility_threshold", 60))
@@ -59,6 +64,21 @@ class PromptContext:
             # 和 ResultReviewer 拒绝两类失败，针对性调整模型设计
             last_result_review_issues_json = json.dumps(
                 ctrl_data.get("last_result_review_issues", []),
+                ensure_ascii=False,
+                indent=2,
+            )
+            # Meta-Router 专用：预算状态
+            modeling_revision_count = str(ctrl_data.get("modeling_revision_count", 0))
+            modeling_revision_budget = str(ctrl_data.get("modeling_revision_budget", 4))
+            modeling_revision_remaining = str(
+                ctrl_data.get("modeling_revision_budget", 4)
+                - ctrl_data.get("modeling_revision_count", 0)
+            )
+            # Meta-Router 专用：当前选中的方案
+            selected_plan_id = ctrl_data.get("selected_plan_id", "")
+            top_k_plans_list = ctrl_data.get("top_k_plans", [])
+            selected_plan_json = json.dumps(
+                next((p for p in top_k_plans_list if p.get("id") == selected_plan_id), {}),
                 ensure_ascii=False,
                 indent=2,
             )
@@ -169,9 +189,11 @@ class PromptContext:
                 ensure_ascii=False,
                 indent=2,
             )
-        # ── 动态 LTM 拆解字段（供 reflection 模板单独引用）──
+        # ── 动态 LTM 拆解字段（供 reflection/meta_router 模板单独引用）──
         dynamic_ltm_assumptions_json = "[]"
         dynamic_ltm_equations_json = "[]"
+        dynamic_ltm_objective_json = '""'
+        dynamic_ltm_solution_outline_json = '""'
         if self.dynamic_ltm is not None:
             dltm_data = self.dynamic_ltm.model_dump(mode="json")
             dynamic_ltm_assumptions_json = json.dumps(
@@ -183,6 +205,15 @@ class PromptContext:
                 dltm_data.get("equations", []),
                 ensure_ascii=False,
                 indent=2,
+            )
+            # Meta-Router 专用：建模目标与方案概要
+            dynamic_ltm_objective_json = json.dumps(
+                dltm_data.get("objective", ""),
+                ensure_ascii=False,
+            )
+            dynamic_ltm_solution_outline_json = json.dumps(
+                dltm_data.get("solution_outline", ""),
+                ensure_ascii=False,
             )
         # recent_stdout 默认空，由 reflection_node 在调用前通过 extra 注入
         recent_stdout = str(extra.get("recent_stdout", ""))[:2000]
@@ -240,6 +271,13 @@ class PromptContext:
             # 动态 LTM 拆解
             "dynamic_ltm_assumptions_json": dynamic_ltm_assumptions_json,
             "dynamic_ltm_equations_json": dynamic_ltm_equations_json,
+            # Meta-Router 专用
+            "dynamic_ltm_objective_json": dynamic_ltm_objective_json,
+            "dynamic_ltm_solution_outline_json": dynamic_ltm_solution_outline_json,
+            "selected_plan_json": selected_plan_json,
+            "modeling_revision_count": modeling_revision_count,
+            "modeling_revision_budget": modeling_revision_budget,
+            "modeling_revision_remaining": modeling_revision_remaining,
             # Reflection 专用
             "recent_stdout": recent_stdout,
             # Coder 自修复专用

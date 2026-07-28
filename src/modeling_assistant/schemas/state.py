@@ -313,7 +313,7 @@ class ControlState(BaseModel):
     rebrainstorm_feedback: list[str] = Field(default_factory=list)
     branch_from_version: str | None = None
     hitl_required: bool = False
-    hitl_stage: Literal["architecture", "final", "arbitration", "none"] = "none"
+    hitl_stage: Literal["architecture", "final", "arbitration", "modeling", "none"] = "none"
     rollback_to_version: str | None = None
     rollback_source: Literal["architecture_hitl", "final_hitl", "arbitration", "none"] = "none"
     # ── 实证反思与假设修正 ──
@@ -336,6 +336,12 @@ class ControlState(BaseModel):
     # - Coder 执行失败 → 调整伪代码复杂度/依赖
     # - ResultReviewer 拒绝 → 调整模型约束（如避免常量列、避免边界值）
     last_result_review_issues: list[str] = Field(default_factory=list)
+    # Meta-Router（中枢 LLM）决策：Reflection 发现 refuted 后，由中枢 LLM 判断
+    # 下一步走向（rediscover/refine_assumptions/adjust_architecture/accept_failure）。
+    # 空字符串表示未调用 Meta-Router，route_after_reflection 回退到原硬编码逻辑。
+    meta_decision: str = ""  # MetaRouterResponse.decision 的值
+    meta_direction_hint: str = ""  # 中枢 LLM 给下游节点的方向提示
+    meta_reasoning: str = ""  # 中枢 LLM 的决策理由（审计用）
 
 
 class GraphState(TypedDict, total=False):

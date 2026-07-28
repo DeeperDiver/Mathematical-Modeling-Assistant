@@ -106,3 +106,22 @@ class ReflectionResponse(BaseModel):
 
     findings: list[ReflectionFinding] = Field(default_factory=list)
     run_summary: str = ""  # 一句话总结本次执行
+
+
+class MetaRouterResponse(BaseModel):
+    """中枢 LLM（Meta-Router）的结构化输出。
+
+    在 Reflection 发现 refuted 后调用，基于全局失败历史决定下一步走向。
+    不写死条件边，让 LLM 统筹判断：回 Mathematician 重新发散、回 Clarifier
+    局部修正、回 Architect 调整设计、或接受失败前进到 Writer。
+    """
+
+    decision: Literal[
+        "rediscover",          # 回 Mathematician 重新发散（换建模范式）
+        "refine_assumptions",  # 回 Clarifier 局部修正（同范式内调整假设）
+        "adjust_architecture", # 回 Architect 调整（模型设计/伪代码层面）
+        "accept_failure",      # 接受失败，前进到 collect_artifacts（Writer 标注待验证）
+    ]
+    reasoning: str = ""  # 决策理由（便于审计）
+    direction_hint: str = ""  # 给下游节点的方向提示（注入 prompt，不强制采纳）
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)

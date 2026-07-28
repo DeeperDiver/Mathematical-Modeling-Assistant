@@ -128,38 +128,52 @@ def route_after_result_reviewer(
     return "reflection"
 
 
-def route_after_reflection(state: GraphState) -> Literal["clarifier", "collect_artifacts", "architect"]:
+def route_after_reflection(state: GraphState) -> Literal["clarifier", "collect_artifacts", "architect", "mathematician", "hitl_modeling"]:
     """Reflection 之后的路由：
 
-    - 有高置信度 refuted 发现且修正预算未耗尽 → 回 Clarifier 修正假设
-    - 预算耗尽时即使有 refuted 发现也强制放行，避免无限循环。
+    - Meta-Router 决策优先：Reflection 发现 refuted 后由中枢 LLM 判断走向
+      （rediscover→mathematician / refine_assumptions→clarifier /
+       adjust_architecture→architect / accept_failure→collect_artifacts）
+    - 无 Meta-Router 决策时回退到原逻辑：回 Clarifier 修正假设
+    - 预算耗尽时触发 HITL modeling，让人类决断（accept/retry/redirect），而非直接产出"待验证"论文。
     - V6 修复（问题 B）：coder 失败（result_paths 为空）且未触发 clarifier 修正时，
       不应前进到 writer 生成不完整论文，而应回退到 coder_rollback_target 重试。
-      预算耗尽时才强制前进到 collect_artifacts，由 writer 在 integrity_warnings
-      中标注「result_paths 为空，所有数值结果必须标注为待验证」。
+      预算耗尽时触发 HITL modeling，由人类决断。
     """
     control = state["control"]
     artifacts = state.get("artifacts", {})
     result_paths = getattr(artifacts, "result_paths", []) if hasattr(artifacts, "result_paths") else artifacts.get("result_paths", [])
 
     if control.trigger_clarifier_revision and not _modeling_budget_exhausted(control):
+        # Meta-Router 决策优先：按中枢 LLM 的判断路由
+        meta = control.meta_decision
+        if meta == "rediscover":
+            logger.info("Meta-Router 决策：回 Mathematician 重新发散")
+            return "mathematician"
+        elif meta == "adjust_architecture":
+            logger.info("Meta-Router 决策：回 Architect 调整模型设计")
+            return "architect"
+        elif meta == "accept_failure":
+            logger.info("Meta-Router 决策：接受失败，前进到 collect_artifacts")
+            return "collect_artifacts"
+        # meta == "refine_assumptions" 或 meta 为空 → 回 Clarifier（原逻辑）
         return "clarifier"
     if control.trigger_clarifier_revision and _modeling_budget_exhausted(control):
         logger.warning(
-            "Modeling budget exhausted (%d/%d) at reflection, forcing collect_artifacts",
+            "Modeling budget exhausted (%d/%d) at reflection, triggering HITL modeling",
             control.modeling_revision_count, control.modeling_revision_budget,
         )
-        return "collect_artifacts"
+        return "hitl_modeling"
 
     # V6 修复（问题 B）：coder 失败（result_paths 为空）时不应前进到 writer
     if not result_paths:
         if _modeling_budget_exhausted(control):
             logger.warning(
                 "Modeling budget exhausted (%d/%d) at reflection with empty result_paths, "
-                "forcing collect_artifacts (writer will mark results as 待验证)",
+                "triggering HITL modeling (writer will mark results as 待验证 if human accepts)",
                 control.modeling_revision_count, control.modeling_revision_budget,
             )
-            return "collect_artifacts"
+            return "hitl_modeling"
         # 预算未耗尽 → 回退到 coder_rollback_target 重试
         target = control.coder_rollback_target or "architect"
         logger.info(
@@ -176,6 +190,29 @@ def route_after_architecture_hitl(state: GraphState) -> Literal["rollback", "arc
     if control.rollback_to_version:
         return "rollback"
     return "architect"
+
+
+def route_after_hitl_modeling(
+    state: GraphState,
+) -> Literal["collect_artifacts", "architect", "mathematician"]:
+    """HITL modeling 之后的路由：
+
+    根据人类决策路由：
+    - accept（hitl_modeling_accepted）→ collect_artifacts（产出"待验证"论文）
+    - retry（hitl_modeling_retry）→ architect（重置预算后回 Architect 重试当前方案）
+    - redirect（hitl_modeling_redirect）→ mathematician（重置预算后回 Mathematician 重新发散）
+    """
+    control = state["control"]
+    phase = control.phase
+    if phase == "hitl_modeling_retry":
+        logger.info("HITL modeling: 人类选择 retry，回 Architect 重试")
+        return "architect"
+    if phase == "hitl_modeling_redirect":
+        logger.info("HITL modeling: 人类选择 redirect，回 Mathematician 重新发散")
+        return "mathematician"
+    # accept 或其他 → collect_artifacts
+    logger.info("HITL modeling: 人类选择 accept，前进到 collect_artifacts")
+    return "collect_artifacts"
 
 
 def route_after_milestone_reviewer_1(

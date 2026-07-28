@@ -19,6 +19,7 @@ from modeling_assistant.agents.nodes import (
     hitl_arbitration_node,
     hitl_architecture_node,
     hitl_final_node,
+    hitl_modeling_node,
     mathematician_node,
     milestone_reviewer_1_node,
     problem_node,
@@ -33,6 +34,7 @@ from modeling_assistant.graph.routing import (
     route_after_arbiter,
     route_after_coder,
     route_after_final_review,
+    route_after_hitl_modeling,
     route_after_milestone_reviewer_1,
     route_after_realist,
     route_after_reflection,
@@ -118,6 +120,7 @@ def build_graph(runtime: AgentRuntime | None = None, *, checkpointer: InMemorySa
     graph.add_node("realist", _bind_runtime(realist_node, resolved_runtime))
     graph.add_node("arbiter", _bind_runtime(arbiter_node, resolved_runtime))
     graph.add_node("hitl_arbitration", _bind_runtime(hitl_arbitration_node, resolved_runtime))
+    graph.add_node("hitl_modeling", _bind_runtime(hitl_modeling_node, resolved_runtime))
     graph.add_node("clarifier", _bind_runtime(clarifier_node, resolved_runtime))
     graph.add_node("milestone_reviewer_1", _bind_runtime(milestone_reviewer_1_node, resolved_runtime))
     graph.add_node("hitl_architecture", _bind_runtime(hitl_architecture_node, resolved_runtime))
@@ -200,13 +203,28 @@ def build_graph(runtime: AgentRuntime | None = None, *, checkpointer: InMemorySa
         route_after_result_reviewer,
         {"reflection": "reflection", "architect": "architect", "clarifier": "clarifier"},
     )
-    # Reflection 后：有 refuted 发现 → 回 Clarifier 修正假设；
+    # Reflection 后：Meta-Router 决策优先（mathematician/clarifier/architect/collect_artifacts）；
     # V6 修复：coder 失败（result_paths 空）+ budget 未耗尽 → 回 architect 重试
     # 否则 → collect_artifacts → writer
     graph.add_conditional_edges(
         "reflection",
         route_after_reflection,
-        {"clarifier": "clarifier", "collect_artifacts": "collect_artifacts", "architect": "architect"},
+        {
+            "clarifier": "clarifier",
+            "collect_artifacts": "collect_artifacts",
+            "architect": "architect",
+            "mathematician": "mathematician",
+            "hitl_modeling": "hitl_modeling",
+        },
+    )
+    # HITL modeling 节点后：根据人类决策路由
+    # - accept → collect_artifacts（产出"待验证"论文）
+    # - retry → architect（重置预算后回 Architect 重试当前方案）
+    # - redirect → mathematician（重置预算后回 Mathematician 重新发散）
+    graph.add_conditional_edges(
+        "hitl_modeling",
+        route_after_hitl_modeling,
+        {"collect_artifacts": "collect_artifacts", "architect": "architect", "mathematician": "mathematician"},
     )
     # collect_artifacts 只在 reflection 通过后执行，直接前进到 writer
     # （回退路径不经过 collect_artifacts，无需条件路由）

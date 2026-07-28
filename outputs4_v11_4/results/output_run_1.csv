@@ -1,2 +1,0 @@
-VehicleID,Type,Route,ArrivalTimes,DepartureTimes,LoadWeights,LoadVolumes,TotalCost,StartCost,EnergyCost,CarbonCost,TimePenalty
-TOTAL,,,,,,,0.0,0.0,0.0,0.0,0.0

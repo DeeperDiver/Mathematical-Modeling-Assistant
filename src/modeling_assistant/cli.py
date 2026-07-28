@@ -33,14 +33,23 @@ def _print_interrupt_info(interrupt_data: dict) -> None:
 
     if "artifacts_summary" in interrupt_data:
         arts = interrupt_data["artifacts_summary"]
-        print(f"  图表: {arts.get('figure_paths', [])}")
+        if "figure_paths" in arts:
+            print(f"  图表: {arts.get('figure_paths', [])}")
         print(f"  结果: {arts.get('result_paths', [])}")
-        print(f"  LaTeX: {arts.get('latex_path', 'N/A')}")
+        if "latex_path" in arts:
+            print(f"  LaTeX: {arts.get('latex_path', 'N/A')}")
+        if "has_backup_results" in arts:
+            print(f"  有备份结果: {arts.get('has_backup_results', 'N/A')}")
 
     if "control_summary" in interrupt_data:
         ctrl = interrupt_data["control_summary"]
         print(f"  方案: {ctrl.get('selected_plan_id', 'N/A')}")
-        print(f"  创新分: {ctrl.get('innovation_score', 'N/A')}, 可行性分: {ctrl.get('feasibility_score', 'N/A')}")
+        if "innovation_score" in ctrl:
+            print(f"  创新分: {ctrl.get('innovation_score', 'N/A')}, 可行性分: {ctrl.get('feasibility_score', 'N/A')}")
+        if "budget_used" in ctrl:
+            print(f"  预算: {ctrl.get('budget_used', 'N/A')}/{ctrl.get('budget_limit', 'N/A')}")
+            print(f"  Meta决策: {ctrl.get('meta_decision', 'N/A')}")
+            print(f"  方向提示: {ctrl.get('meta_direction_hint', 'N/A')}")
 
     print("-" * 60)
 
@@ -159,6 +168,32 @@ def main() -> None:
                     "selected_plan_id": control.selected_plan_id,
                     "innovation_score": control.innovation_score,
                     "feasibility_score": control.feasibility_score,
+                },
+            })
+        elif control.hitl_stage == "modeling":
+            artifacts = result.get("artifacts", ArtifactBundle())
+            _print_interrupt_info({
+                "stage": "modeling",
+                "message": (
+                    f"建模预算已耗尽（{control.modeling_revision_count}/{control.modeling_revision_budget}）。"
+                    "系统多次尝试未能产出通过验证的结果，请人类决断下一步。"
+                ),
+                "hint": (
+                    "输入 'accept' 接受失败并产出'待验证'论文；"
+                    "输入 'retry' 重置预算并回到 Architect 重试当前方案；"
+                    "输入 'redirect <方向提示>' 重置预算并回到 Mathematician 重新发散。"
+                ),
+                "control_summary": {
+                    "phase": control.phase,
+                    "budget_used": control.modeling_revision_count,
+                    "budget_limit": control.modeling_revision_budget,
+                    "selected_plan_id": control.selected_plan_id,
+                    "meta_decision": control.meta_decision,
+                    "meta_direction_hint": control.meta_direction_hint,
+                },
+                "artifacts_summary": {
+                    "result_paths": getattr(artifacts, "result_paths", []),
+                    "has_backup_results": bool(getattr(artifacts, "result_paths", None)),
                 },
             })
         else:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 import subprocess
@@ -20,6 +21,7 @@ from modeling_assistant.schemas.responses import (
     CoderResponse,
     DrawerResponse,
     MathematicianResponse,
+    MetaRouterResponse,
     MilestoneReviewer1Response,
     RealistResponse,
     ReflectionResponse,
@@ -247,6 +249,12 @@ def mathematician_node(state: GraphState, runtime: AgentRuntime | None = None, c
 
     # 重置分支请求状态：每次调用都是一次新的主动决策
     control.branch_from_version = None
+
+    # Meta-Router 决策已消费：重置 trigger_clarifier_revision 和 meta_decision，
+    # 让下次 reflection 能重新调用 Meta-Router（否则 already_triggered=True 跳过）
+    if control.meta_decision:
+        control.trigger_clarifier_revision = False
+        control.meta_decision = ""
 
     control.debate_round += 1
     control.phase = "model_brainstorming"
@@ -591,6 +599,8 @@ def clarifier_node(state: GraphState, runtime: AgentRuntime | None = None, confi
     # 重置 trigger_clarifier_revision：Clarifier 已完成修正，下游 collect_artifacts
     # 可正常前进到 Writer。否则该标志会一直为 True，导致 collect_artifacts 永久跳过 Writer
     control.trigger_clarifier_revision = False
+    # Meta-Router 决策已消费：重置 meta_decision
+    control.meta_decision = ""
     return {
         "dynamic_ltm": new_dynamic_ltm,
         "ltm_archive": [snapshot],
@@ -726,6 +736,90 @@ def hitl_arbitration_node(state: GraphState, runtime: AgentRuntime | None = None
     return {"control": control}
 
 
+def hitl_modeling_node(state: GraphState, runtime: AgentRuntime | None = None, config: dict | None = None) -> GraphState:
+    """建模预算耗尽时的人类介入节点。
+
+    当 modeling_revision_count >= modeling_revision_budget 时触发，
+    让人类决断下一步，而非直接产出"待验证"论文。
+
+    三个选项：
+    - accept：接受失败，前进到 collect_artifacts（现行"待验证"降级行为）
+    - retry：重置 budget，回 architect 重试（沿用当前 selected_plan，但人类介入后继续）
+    - redirect：重置 budget，回 mathematician 重新发散（人类可注入 direction_hint 换方向）
+    """
+    control = _control(state)
+    dynamic_ltm = _dynamic_ltm(state)
+    artifacts = _artifacts(state)
+    result_paths = getattr(artifacts, "result_paths", []) or []
+
+    # 设置 HITL 标志，让 cli.py 主循环识别并处理中断
+    control.hitl_required = True
+    control.hitl_stage = "modeling"
+
+    decision = interrupt({
+        "stage": "modeling",
+        "message": (
+            f"建模预算已耗尽（{control.modeling_revision_count}/{control.modeling_revision_budget}）。"
+            "系统多次尝试未能产出通过验证的结果，请人类决断下一步。"
+        ),
+        "hint": (
+            "输入 'accept' 接受失败并产出'待验证'论文；"
+            "输入 'retry' 重置预算并回到 Architect 重试当前方案；"
+            "输入 'redirect <方向提示>' 重置预算并回到 Mathematician 重新发散。"
+        ),
+        "control_summary": {
+            "phase": control.phase,
+            "budget_used": control.modeling_revision_count,
+            "budget_limit": control.modeling_revision_budget,
+            "current_sub_problem": control.current_sub_problem,
+            "selected_plan_id": control.selected_plan_id,
+            "trigger_clarifier_revision": control.trigger_clarifier_revision,
+            "meta_decision": control.meta_decision,
+            "meta_direction_hint": control.meta_direction_hint,
+        },
+        "dynamic_ltm_summary": {
+            "objective": dynamic_ltm.objective,
+            "assumptions_count": len(dynamic_ltm.assumptions),
+            "equations_count": len(dynamic_ltm.equations),
+        },
+        "result_paths": result_paths,
+        "has_backup_results": bool(getattr(artifacts, "result_paths", None)),
+    })
+
+    action = _parse_hitl_decision(decision)
+    # 重置 HITL 标志（HITL 已执行）
+    control.hitl_required = False
+    control.hitl_stage = "none"
+
+    if action["type"] == "retry":
+        # 重置预算，回 architect 重试当前方案
+        control.modeling_revision_count = 0
+        control.trigger_clarifier_revision = False
+        control.meta_decision = ""
+        control.phase = "hitl_modeling_retry"
+        logger.info("HITL modeling: 人类选择 retry，重置预算回 Architect 重试")
+    elif action["type"] == "redirect":
+        # 重置预算，回 mathematician 重新发散
+        control.modeling_revision_count = 0
+        control.trigger_clarifier_revision = False
+        control.need_rebrainstorm = True
+        control.rebrainstorm_feedback.append("人类介入：要求重新发散建模方向")
+        # 人类可注入方向提示
+        hint = action.get("version") or ""
+        if hint:
+            control.meta_direction_hint = hint
+            control.rebrainstorm_feedback.append(f"人类方向提示：{hint}")
+        control.meta_decision = ""
+        control.phase = "hitl_modeling_redirect"
+        logger.info("HITL modeling: 人类选择 redirect，重置预算回 Mathematician 重新发散")
+    else:
+        # accept：接受失败，前进到 collect_artifacts
+        control.phase = "hitl_modeling_accepted"
+        logger.info("HITL modeling: 人类选择 accept，接受失败产出'待验证'论文")
+
+    return {"control": control}
+
+
 def hitl_final_node(state: GraphState, runtime: AgentRuntime | None = None, config: dict | None = None) -> GraphState:
     """Milestone Reviewer 2：终稿审查。
 
@@ -772,6 +866,12 @@ def _parse_hitl_decision(decision) -> dict:
         return {"type": "retry", "version": version}
     if text.startswith("reject"):
         return {"type": "reject"}
+    if text.startswith("redirect"):
+        parts = text.split(maxsplit=1)
+        hint = parts[1] if len(parts) > 1 else ""
+        return {"type": "redirect", "version": hint}
+    if text.startswith("accept"):
+        return {"type": "accept"}
     return {"type": "approve"}
 
 
@@ -779,6 +879,11 @@ def architect_node(state: GraphState, runtime: AgentRuntime | None = None, confi
     resolved_runtime = _runtime(runtime)
     control = _control(state)
     artifacts = _artifacts(state)
+
+    # Meta-Router 决策已消费：重置 trigger_clarifier_revision 和 meta_decision
+    if control.meta_decision:
+        control.trigger_clarifier_revision = False
+        control.meta_decision = ""
 
     system_prompt, audit = _prompt_audit("architect", state, runtime)
     try:
@@ -1162,6 +1267,50 @@ def coder_node(state: GraphState, runtime: AgentRuntime | None = None, config: d
     return {"artifacts": artifacts, "control": control, "prompt_audit": audit}
 
 
+def _invoke_meta_router(
+    state: GraphState,
+    runtime: AgentRuntime | None,
+    resolved_runtime: AgentRuntime,
+    refuted_findings: list,
+) -> MetaRouterResponse | None:
+    """中枢 LLM（Meta-Router）：Reflection 发现 refuted 后判断下一步走向。
+
+    基于 Reflection 的反馈和全局失败历史，决策回哪个节点修正：
+    - rediscover → Mathematician（重新发散，换建模范式）
+    - refine_assumptions → Clarifier（局部修正假设）
+    - adjust_architecture → Architect（调整模型设计）
+    - accept_failure → collect_artifacts（接受失败，Writer 标注待验证）
+
+    失败时返回 None，调用方回退到原逻辑（默认回 Clarifier）。
+    """
+    try:
+        refuted_findings_json = json.dumps(
+            [
+                {
+                    "assumption_tested": f.assumption_tested,
+                    "evidence": f.evidence,
+                    "verdict": f.verdict,
+                    "confidence": f.confidence,
+                    "suggested_fix": f.suggested_fix,
+                }
+                for f in refuted_findings
+            ],
+            ensure_ascii=False,
+            indent=2,
+        )
+        system_prompt, _audit = _prompt_audit(
+            "meta_router", state, runtime,
+            extra={"refuted_findings_json": refuted_findings_json},
+        )
+        decision = resolved_runtime.invoke_structured(
+            "meta_router", state, MetaRouterResponse, system_prompt=system_prompt
+        )
+        return decision if isinstance(decision, MetaRouterResponse) else None
+    except Exception as exc:
+        logger.warning("Meta-Router LLM 调用失败，回退到原逻辑: %s", exc)
+        return None
+
+
 def reflection_node(state: GraphState, runtime: AgentRuntime | None = None, config: dict | None = None) -> GraphState:
     """Coder 成功后的反思节点：从执行输出提炼实证发现。
 
@@ -1285,14 +1434,43 @@ def reflection_node(state: GraphState, runtime: AgentRuntime | None = None, conf
             for f in new_findings
         )
         if has_refuted and not already_triggered and control.modeling_revision_count < control.modeling_revision_budget:
-            control.trigger_clarifier_revision = True
-            control.modeling_revision_count += 1
-            control.phase = "revision_triggered"
-            logger.info(
-                "Reflection 触发 Clarifier 修正（统一预算已用 %d/%d）",
-                control.modeling_revision_count,
-                control.modeling_revision_budget,
+            # Meta-Router（中枢 LLM）决策：基于全局失败历史判断下一步走向。
+            # 不写死条件边，让 LLM 统筹判断回 Mathematician / Clarifier / Architect 还是接受失败。
+            # 失败时回退到原逻辑（默认回 Clarifier）。
+            refuted_findings = [
+                f for f in new_findings
+                if f.verdict == "refuted" and f.confidence >= REFUTED_CONFIDENCE_THRESHOLD
+            ]
+            meta_decision = _invoke_meta_router(
+                state, runtime, resolved_runtime, refuted_findings
             )
+            if meta_decision is not None:
+                control.meta_decision = meta_decision.decision
+                control.meta_direction_hint = meta_decision.direction_hint
+                control.meta_reasoning = meta_decision.reasoning
+                # 消费 budget（无论决策是什么，都算一次修正尝试）
+                control.modeling_revision_count += 1
+                control.trigger_clarifier_revision = True
+                control.phase = "revision_triggered"
+                logger.info(
+                    "Meta-Router 决策：%s（置信度 %.2f）— %s | direction_hint=%s（预算 %d/%d）",
+                    meta_decision.decision,
+                    meta_decision.confidence,
+                    meta_decision.reasoning[:100],
+                    meta_decision.direction_hint[:100],
+                    control.modeling_revision_count,
+                    control.modeling_revision_budget,
+                )
+            else:
+                # Meta-Router 调用失败，回退到原逻辑（回 Clarifier）
+                control.trigger_clarifier_revision = True
+                control.modeling_revision_count += 1
+                control.phase = "revision_triggered"
+                logger.info(
+                    "Meta-Router 失败，回退到 Clarifier 修正（预算 %d/%d）",
+                    control.modeling_revision_count,
+                    control.modeling_revision_budget,
+                )
         elif already_triggered:
             # 上游 ResultReviewer 已触发修正，保留其决策
             control.phase = "revision_triggered"

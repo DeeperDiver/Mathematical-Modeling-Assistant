@@ -293,9 +293,9 @@ def test_route_after_reflection_empty_results_returns_to_architect():
     assert route_after_reflection(state) == "clarifier"
 
 
-def test_route_after_reflection_empty_results_budget_exhausted_forces_writer():
-    """V6 修复：coder 失败 + budget 耗尽 → 强制前进到 collect_artifacts，
-    writer 会在 integrity_warnings 中标注 result_paths 为空。
+def test_route_after_reflection_empty_results_budget_exhausted_triggers_hitl():
+    """budget 耗尽 + coder 失败（result_paths 空）→ 触发 HITL modeling，
+    由人类决断（accept/retry/redirect），而非直接产出"待验证"论文。
     """
     from modeling_assistant.graph.routing import route_after_reflection
 
@@ -307,7 +307,24 @@ def test_route_after_reflection_empty_results_budget_exhausted_forces_writer():
         ),
         "artifacts": ArtifactBundle(result_paths=[]),
     }
-    assert route_after_reflection(state) == "collect_artifacts"
+    assert route_after_reflection(state) == "hitl_modeling"
+
+
+def test_route_after_reflection_trigger_clarifier_budget_exhausted_triggers_hitl():
+    """budget 耗尽 + trigger_clarifier_revision=True → 触发 HITL modeling，
+    而非回 clarifier 或直接产出"待验证"论文。
+    """
+    from modeling_assistant.graph.routing import route_after_reflection
+
+    state = {
+        "control": ControlState(
+            trigger_clarifier_revision=True,
+            modeling_revision_count=4,
+            modeling_revision_budget=4,
+        ),
+        "artifacts": ArtifactBundle(result_paths=[]),
+    }
+    assert route_after_reflection(state) == "hitl_modeling"
 
 
 def test_route_after_reflection_with_results_goes_to_collect_artifacts():
@@ -359,6 +376,27 @@ def test_route_after_rollback_respects_source():
 
     state = {"control": ControlState(rollback_source="arbitration")}
     assert route_after_rollback(state) == "architect"
+
+
+def test_route_after_hitl_modeling_routes_by_decision():
+    """HITL modeling 后根据人类决策路由：accept→collect_artifacts, retry→architect, redirect→mathematician。"""
+    from modeling_assistant.graph.routing import route_after_hitl_modeling
+
+    # accept → collect_artifacts
+    state = {"control": ControlState(phase="hitl_modeling_accepted")}
+    assert route_after_hitl_modeling(state) == "collect_artifacts"
+
+    # retry → architect
+    state = {"control": ControlState(phase="hitl_modeling_retry")}
+    assert route_after_hitl_modeling(state) == "architect"
+
+    # redirect → mathematician
+    state = {"control": ControlState(phase="hitl_modeling_redirect")}
+    assert route_after_hitl_modeling(state) == "mathematician"
+
+    # 未知 phase → 兜底 collect_artifacts
+    state = {"control": ControlState(phase="unknown")}
+    assert route_after_hitl_modeling(state) == "collect_artifacts"
 
 
 def test_milestone_reviewer_1_hard_rejection():
