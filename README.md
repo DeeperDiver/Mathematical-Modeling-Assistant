@@ -58,3 +58,26 @@ tests/          架构级测试
 ```
 
 真实模型调用、论文检索、绘图和算法执行将在后续实现中接入 `AgentRuntime` 接口。
+
+## 优秀论文表达学习（Exemplar Learning System）
+
+把「题目 + 优秀论文」对提炼为结构化表达知识（L1 单篇卡片 → L2 题型指南 → L3 全局偏好），
+运行时检索并分级注入 Architect / Drawer / Writer / Reviewer 的 prompt，
+提升论文结构、图表与文风，同时不污染建模正确性。
+
+快速开始：
+
+```powershell
+# 1. 把论文放入 exemplars/raw/（同一目录可放 problem.txt 作为题面）
+# 2. 摄入并聚合：
+python scripts/ingest_exemplars.py --input exemplars/raw --output exemplars
+# 3. 运行时启用：
+python -m modeling_assistant.cli --problem "..." --exemplars-dir exemplars
+```
+
+常用脚本：
+
+- `scripts/ingest_exemplars.py`：批量摄入论文，生成卡片并聚合题型指南。
+- `scripts/leave_one_out_eval.py`：留一验证，量化每张卡片的独有贡献。
+
+详细设计见 `docs/exemplar_learning_plan.md`。

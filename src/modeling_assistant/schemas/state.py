@@ -344,6 +344,80 @@ class ControlState(BaseModel):
     meta_reasoning: str = ""  # 中枢 LLM 的决策理由（审计用）
 
 
+# ──────────────── 优秀论文表达学习层（Exemplar Learning System） ────────────────
+# 离线提炼的 L1 单篇卡片 / L2 题型指南 / L3 全局偏好，运行时检索后注入
+# Architect / Drawer / Writer / Reviewer 的 prompt。只影响「怎么说」，
+# 不影响「算什么」：公式、数值与方法仍只走 LTM + Coder 验证链。
+
+
+class ExemplarFigure(BaseModel):
+    """单张示例图表的风格描述。"""
+
+    figure_type: str  # boxplot / scatter / heatmap / pareto / convergence / gantt ...
+    purpose: str = ""  # 这张图回答什么问题
+    style_notes: str = ""  # 配色、标注、字号、坐标轴习惯
+    example_path: str = ""  # 示例图文件路径（可选）
+
+
+class ExemplarPaper(BaseModel):
+    """L1 单篇论文卡片：由摄取器从（题目, 优秀论文）对提炼。"""
+
+    id: str
+    title: str = ""
+    source_path: str = ""  # 原文路径
+    problem_type: str = ""  # 题型标签：optimization/physics/forecasting/evaluation/data_mining
+    contest: str = ""  # 赛事语境：国赛/美赛/华中杯/...
+    year: int | None = None
+    structure: dict[str, str] = Field(default_factory=dict)  # {章节名: 目的/写法}
+    section_notes: list[str] = Field(default_factory=list)  # 每节写法要点
+    figures: list[ExemplarFigure] = Field(default_factory=list)
+    writing_style: dict[str, str] = Field(default_factory=dict)  # 文风特征
+    summary_style: str = ""  # 摘要写法套路
+    highlights: list[str] = Field(default_factory=list)  # 个性亮点（只进 L1，不进 L2）
+    pitfalls: list[str] = Field(default_factory=list)  # 雷区
+    quotes: list[str] = Field(default_factory=list)  # 短摘录，单条 ≤ 80 字（受查重护栏约束）
+    quality_score: float = Field(default=0.5, ge=0.0, le=1.0)  # 反馈回写权重
+    tags: list[str] = Field(default_factory=list)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class TypeStyleGuide(BaseModel):
+    """L2 题型风格指南：由同组多篇卡片聚合，多篇共有才进共性字段。"""
+
+    problem_type: str
+    contest: str = ""
+    common_structure: list[str] = Field(default_factory=list)  # 共性骨架
+    structure_variants: list[str] = Field(default_factory=list)  # 可选变体
+    recommended_figures: list[str] = Field(default_factory=list)
+    writing_baseline: dict[str, str] = Field(default_factory=dict)
+    common_pitfalls: list[str] = Field(default_factory=list)
+    exemplar_ids: list[str] = Field(default_factory=list)
+    quality_score: float = Field(default=0.5, ge=0.0, le=1.0)  # 反馈回写权重
+    version: str = "1.0"
+    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+class GlobalStyleProfile(BaseModel):
+    """L3 全局风格偏好：用户个人审美，独立于优秀论文。"""
+
+    color_palette: list[str] = Field(default_factory=list)
+    figure_preferences: list[str] = Field(default_factory=list)
+    writing_preferences: dict[str, str] = Field(default_factory=dict)
+    notes: str = ""
+
+
+class ExemplarContext(BaseModel):
+    """运行时注入包：检索结果 + 注入开关。"""
+
+    active: bool = False
+    guide: TypeStyleGuide | None = None
+    cards: list[ExemplarPaper] = Field(default_factory=list)
+    profile: GlobalStyleProfile | None = None  # L3 全局偏好
+    injection: dict[str, bool] = Field(
+        default_factory=lambda: {"structure": True, "chart": True, "writing": True}
+    )
+
+
 class GraphState(TypedDict, total=False):
     static_ltm: Annotated[StaticLTM, overwrite_reducer]
     dynamic_ltm: Annotated[DynamicLTM, overwrite_reducer]
@@ -352,3 +426,4 @@ class GraphState(TypedDict, total=False):
     control: Annotated[ControlState, overwrite_reducer]
     artifacts: Annotated[ArtifactBundle, merge_artifacts_reducer]
     prompt_audit: Annotated[dict[str, str], merge_dict_reducer]
+    exemplars: Annotated[ExemplarContext, overwrite_reducer]

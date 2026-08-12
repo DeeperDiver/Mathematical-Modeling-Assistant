@@ -1,0 +1,10 @@
+# L3 全局风格偏好（用户个人审美，独立于优秀论文）
+# 可手工编辑；运行时作为最上层软约束注入 Drawer / Writer。
+color_palette: []
+figure_preferences:
+  - 优先使用箱线图与散点图
+  - 图表风格简洁，避免 3D 装饰
+writing_preferences:
+  detail_level: 公式与文字解释并重
+  tense: 一般现在时
+notes: 默认空偏好；填写后将作为最上层软约束注入 Drawer/Writer。

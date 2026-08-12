@@ -8,6 +8,10 @@
 动态 LTM：
 {dynamic_ltm_json}
 
+【优秀论文结构参考】（exemplar_active={exemplar_active}；开启时提供，仅供参考。
+允许借鉴章节骨架与每节写法，**禁止复制示例中的具体句子、公式、数值与图表数据**）
+{exemplar_structure_json}
+
 历史错误日志（Coder 最近失败记录，如为空则忽略）：
 失败次数：{coder_error_count}
 错误详情：

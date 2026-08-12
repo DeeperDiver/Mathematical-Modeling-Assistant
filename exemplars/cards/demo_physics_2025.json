@@ -1,0 +1,52 @@
+{
+  "id": "demo_physics_2025",
+  "title": "烟雾弹干扰效能建模（示例卡片）",
+  "source_path": "exemplars/raw/physics_2025.pdf",
+  "problem_type": "physics",
+  "contest": "国赛",
+  "year": 2025,
+  "structure": {
+    "问题重述": "明确物理场景与待求量",
+    "模型假设": "列出关键物理假设（匀速、球形扩散等）",
+    "模型建立": "从运动学/几何关系推导核心方程",
+    "模型求解": "数值积分或解析解",
+    "结果分析": "给出有效遮蔽时间等指标",
+    "模型检验": "与题给数据/常识对比验证"
+  },
+  "section_notes": [
+    "每个假设都要标注题面出处或说明为推断值",
+    "公式推导过程完整，符号表先于公式给出",
+    "数值结果必须注明单位"
+  ],
+  "figures": [
+    {
+      "figure_type": "trajectory",
+      "purpose": "展示弹体与云团运动轨迹",
+      "style_notes": "轨迹线加箭头，坐标系标注清楚"
+    },
+    {
+      "figure_type": "timeline",
+      "purpose": "展示遮蔽时间窗口",
+      "style_notes": "用色带区分有效遮蔽区间"
+    }
+  ],
+  "writing_style": {
+    "tense": "一般现在时",
+    "detail_level": "推导为主、数值为辅",
+    "notation": "先定义符号再使用"
+  },
+  "summary_style": "物理背景一句+建模思路一句+关键结果一句",
+  "highlights": [
+    "把云团离散为多层球壳求遮蔽概率，比单点模型更精细",
+    "对起爆时间做了参数扫描得到最优窗口"
+  ],
+  "pitfalls": [
+    "单位换算错误导致结果量级失真",
+    "忽略云团下沉速度对遮蔽时间的影响"
+  ],
+  "quotes": [
+    "考虑到烟幕云团以恒定速度下沉，本文建立了三维运动学模型以刻画遮蔽窗口的时空演化。"
+  ],
+  "quality_score": 0.85,
+  "tags": ["ballistics", "kinematics", "simulation"]
+}

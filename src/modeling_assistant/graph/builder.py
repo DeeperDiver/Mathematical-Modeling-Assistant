@@ -14,6 +14,7 @@ from modeling_assistant.agents.nodes import (
     clarifier_node,
     coder_node,
     drawer_node,
+    exemplar_loader_node,
     fact_extractor_node,
     final_reviewer_node,
     hitl_arbitration_node,
@@ -116,6 +117,7 @@ def build_graph(runtime: AgentRuntime | None = None, *, checkpointer: InMemorySa
     graph.add_node("analyst", _bind_runtime(analyst_node, resolved_runtime))
     graph.add_node("data_profile", _bind_runtime(data_profile_node, resolved_runtime))
     graph.add_node("searcher", _bind_runtime(searcher_node, resolved_runtime))
+    graph.add_node("exemplar_loader", _bind_runtime(exemplar_loader_node, resolved_runtime))
     graph.add_node("mathematician", _bind_runtime(mathematician_node, resolved_runtime))
     graph.add_node("realist", _bind_runtime(realist_node, resolved_runtime))
     graph.add_node("arbiter", _bind_runtime(arbiter_node, resolved_runtime))
@@ -141,7 +143,9 @@ def build_graph(runtime: AgentRuntime | None = None, *, checkpointer: InMemorySa
     graph.add_edge("fact_extractor", "analyst")
     graph.add_edge("analyst", "data_profile")
     graph.add_edge("data_profile", "searcher")
-    graph.add_edge("searcher", "mathematician")
+    # Exemplar Learning System：检索优秀论文表达知识后再进入建模阶段
+    graph.add_edge("searcher", "exemplar_loader")
+    graph.add_edge("exemplar_loader", "mathematician")
     graph.add_edge("mathematician", "realist")
     graph.add_conditional_edges(
         "realist",

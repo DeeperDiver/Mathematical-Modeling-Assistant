@@ -18,6 +18,7 @@ class PromptContext:
     empirical: BaseModel | None = None
     control: BaseModel | None = None
     artifacts: BaseModel | None = None
+    exemplars: BaseModel | None = None
     extra: dict[str, Any] | None = None
 
     def to_template_vars(self) -> dict[str, str]:
@@ -238,6 +239,109 @@ class PromptContext:
                 ensure_ascii=False,
                 indent=2,
             )
+        # ── Exemplar 表达知识注入（默认全空，active=False 时模板显示为空块）──
+        exemplar_active = "false"
+        exemplar_structure_json = "[]"
+        exemplar_chart_json = "[]"
+        exemplar_writing_json = "{}"
+        exemplar_highlights_json = "[]"
+        exemplar_quotes_json = "[]"
+        style_profile_json = "{}"
+        if self.exemplars is not None:
+            from modeling_assistant.schemas.state import (
+                ExemplarPaper,
+                GlobalStyleProfile,
+                TypeStyleGuide,
+            )
+
+            ctx = self.exemplars
+            ctx_data = ctx.model_dump(mode="json") if isinstance(ctx, BaseModel) else {}
+            if ctx_data.get("active"):
+                exemplar_active = "true"
+            injection = ctx_data.get("injection", {}) or {}
+            guide_raw = ctx_data.get("guide")
+            cards_raw = ctx_data.get("cards", []) or []
+            profile_raw = ctx_data.get("profile")
+            guide = None
+            if isinstance(guide_raw, dict):
+                try:
+                    guide = TypeStyleGuide.model_validate(guide_raw)
+                except Exception:
+                    guide = None
+            cards: list[ExemplarPaper] = []
+            for raw in cards_raw:
+                if isinstance(raw, dict):
+                    try:
+                        cards.append(ExemplarPaper.model_validate(raw))
+                    except Exception:
+                        continue
+            profile = None
+            if isinstance(profile_raw, dict):
+                try:
+                    profile = GlobalStyleProfile.model_validate(profile_raw)
+                except Exception:
+                    profile = None
+
+            # 结构（强注入）：共性骨架 + 变体
+            if injection.get("structure", True) and guide is not None:
+                structure_entries = [
+                    {"section": s} for s in (guide.common_structure + guide.structure_variants)
+                ]
+                exemplar_structure_json = json.dumps(
+                    structure_entries, ensure_ascii=False, indent=2
+                )
+            # 图表（中注入）：指南推荐 + 卡片图表
+            if injection.get("chart", True):
+                chart_entries: list[dict] = []
+                if guide is not None:
+                    chart_entries.extend(
+                        {"figure_type": f, "purpose": ""} for f in guide.recommended_figures
+                    )
+                for card in cards:
+                    for fig in card.figures:
+                        chart_entries.append(
+                            {
+                                "figure_type": fig.figure_type,
+                                "purpose": fig.purpose,
+                                "style_notes": fig.style_notes,
+                            }
+                        )
+                exemplar_chart_json = json.dumps(
+                    chart_entries[:20], ensure_ascii=False, indent=2
+                )
+            # 文风（中/弱注入，可被 Dropout 关闭）：指南基线 + 卡片文风
+            if injection.get("writing", True):
+                writing_entries: dict[str, str] = {}
+                if guide is not None:
+                    writing_entries.update(guide.writing_baseline)
+                for card in cards:
+                    writing_entries.update(card.writing_style)
+                    if card.summary_style:
+                        writing_entries.setdefault("summary_style", card.summary_style)
+                exemplar_writing_json = json.dumps(
+                    writing_entries, ensure_ascii=False, indent=2
+                )
+            # 亮点与短摘录（始终提供，供 Writer 参考，受防抄袭约束）
+            exemplar_highlights_json = json.dumps(
+                [
+                    {"card": c.id, "highlight": h}
+                    for c in cards
+                    for h in c.highlights
+                ],
+                ensure_ascii=False,
+                indent=2,
+            )
+            exemplar_quotes_json = json.dumps(
+                [
+                    {"card": c.id, "quote": q}
+                    for c in cards
+                    for q in c.quotes
+                ],
+                ensure_ascii=False,
+                indent=2,
+            )
+            if profile is not None:
+                style_profile_json = profile.model_dump_json(indent=2)
         return {
             "static_ltm_json": _json_model(self.static_ltm),
             "dynamic_ltm_json": _json_model(self.dynamic_ltm),
@@ -284,6 +388,16 @@ class PromptContext:
             "recent_stderr": recent_stderr,
             # Writer 专用：真实结果文件预览（V10 修复）
             "result_preview": result_preview,
+            # Writer 完整性警告默认值（writer_node 会通过 extra 覆盖）
+            "integrity_warnings": str(extra.get("integrity_warnings", "无（所有关键产物完整）")),
+            # Exemplar 表达知识
+            "exemplar_active": exemplar_active,
+            "exemplar_structure_json": exemplar_structure_json,
+            "exemplar_chart_json": exemplar_chart_json,
+            "exemplar_writing_json": exemplar_writing_json,
+            "exemplar_highlights_json": exemplar_highlights_json,
+            "exemplar_quotes_json": exemplar_quotes_json,
+            "style_profile_json": style_profile_json,
             **{key: str(value) for key, value in extra.items() if key not in ("recent_stdout", "recent_stderr", "result_preview")},
         }
 

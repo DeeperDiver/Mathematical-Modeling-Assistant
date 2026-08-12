@@ -34,3 +34,7 @@ test_write.tmp
 
 # 实例测试（题目、附件与端到端运行脚本及其输出）
 real_tests/
+
+# 优秀论文原文（私有资产，不纳入版本控制；提炼卡片与题型指南保留）
+exemplars/raw/
+exemplars/leave_one_out_report.json

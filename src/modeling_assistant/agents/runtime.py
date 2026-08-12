@@ -21,6 +21,7 @@ from modeling_assistant.schemas.state import (
     ControlState,
     DynamicLTM,
     EmpiricalLayer,
+    ExemplarContext,
     GraphState,
     StaticLTM,
 )
@@ -142,6 +143,7 @@ class AgentRuntime:
             empirical=state.get("empirical", EmpiricalLayer()),
             control=state.get("control", ControlState()),
             artifacts=state.get("artifacts", ArtifactBundle()),
+            exemplars=state.get("exemplars", ExemplarContext()),
             extra=merged_extra,
         )
         return self.prompts.render(name, context)

@@ -14,10 +14,15 @@ from modeling_assistant.schemas.state import (
     ArtifactBundle,
     ControlState,
     DynamicLTM,
+    ExemplarContext,
+    ExemplarFigure,
+    ExemplarPaper,
     GraphState,
+    GlobalStyleProfile,
     LtmSnapshot,
     PlanCandidate,
     StaticLTM,
+    TypeStyleGuide,
 )
 
 __all__ = [
@@ -29,11 +34,16 @@ __all__ = [
     "ControlState",
     "DrawerResponse",
     "DynamicLTM",
+    "ExemplarContext",
+    "ExemplarFigure",
+    "ExemplarPaper",
     "GraphState",
+    "GlobalStyleProfile",
     "LtmSnapshot",
     "MathematicianResponse",
     "PlanCandidate",
     "RealistResponse",
     "StaticLTM",
+    "TypeStyleGuide",
     "WriterResponse",
 ]

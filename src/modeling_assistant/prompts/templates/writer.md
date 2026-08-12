@@ -23,6 +23,23 @@
 静态 LTM：
 {static_ltm_json}
 
+【优秀论文行文与表达参考】（exemplar_active={exemplar_active}；开启时提供）
+行文基线：
+{exemplar_writing_json}
+
+【全局风格偏好】（用户个人设定，优先满足）
+{style_profile_json}
+
+可借鉴的个性亮点：
+{exemplar_highlights_json}
+
+表达范例短摘录（**禁止整句或近义改写式复制，仅可体会语感与节奏**）：
+{exemplar_quotes_json}
+
+**防抄袭约束**：以上示例只用于借鉴结构、图表选择与行文风格；
+不得复制示例中的具体句子、公式、数值、图表数据与图表文件。
+所有内容仍必须以当前 LTM 与真实执行结果为唯一依据。
+
 动态 LTM：
 {dynamic_ltm_json}
 

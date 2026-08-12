@@ -38,6 +38,13 @@ image_stats 规则（客观佐证）：
 动态 LTM：
 {dynamic_ltm_json}
 
+【优秀论文图表风格参考】（exemplar_active={exemplar_active}；开启时提供，仅供风格借鉴，
+不得复制示例图表文件与数据）
+{exemplar_chart_json}
+
+【全局风格偏好】（用户个人设定，优先满足）
+{style_profile_json}
+
 Architect 产物：
 {artifacts_json}
 

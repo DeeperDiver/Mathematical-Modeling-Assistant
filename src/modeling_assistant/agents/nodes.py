@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import random
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -228,6 +230,49 @@ def searcher_node(state: GraphState, runtime: AgentRuntime | None = None, config
     control = _control(state)
     control.phase = "literature_collected"
     return {"static_ltm": static_ltm, "control": control}
+
+
+def exemplar_loader_node(
+    state: GraphState,
+    runtime: AgentRuntime | None = None,
+    config: dict | None = None,
+) -> GraphState:
+    """加载优秀论文表达知识（Exemplar Learning System）。
+
+    在 searcher 之后、mathematician 之前运行：检索与当前题型匹配的 L1 卡片、
+    L2 题型指南与 L3 全局偏好，组装 ExemplarContext 供下游 prompt 注入。
+
+    设计原则：
+    - 无知识库或相关性低于阈值 → 返回 inactive 的 ExemplarContext，
+      现有建模/路由/验证逻辑完全不变。
+    - writing 卡按 style_dropout_rate 概率随机关闭，防止系统过度依赖示例文风。
+    """
+    resolved_runtime = _runtime(runtime)
+    static_ltm = _static_ltm(state)
+    from modeling_assistant.memory.exemplar_search import load_exemplar_context
+
+    context = load_exemplar_context(
+        resolved_runtime.settings,
+        static_ltm.raw_problem,
+        runtime=resolved_runtime,
+        problem_understanding=static_ltm.problem_understanding,
+    )
+    # 注入强度分级（数值作为各层注入概率）+ writing 卡额外 dropout：
+    # 防止系统过度依赖示例库，保持输出多样性。
+    if context.active:
+        for key, strength in resolved_runtime.settings.style_injection.items():
+            if strength <= 0:
+                context.injection[key] = False
+            elif strength < 1.0 and random.random() > strength:
+                context.injection[key] = False
+        if context.injection.get("writing", False):
+            if random.random() < resolved_runtime.settings.style_dropout_rate:
+                context.injection["writing"] = False
+                logger.info(
+                    "Exemplar writing 注入被 Dropout 关闭（rate=%.2f）",
+                    resolved_runtime.settings.style_dropout_rate,
+                )
+    return {"exemplars": context}
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -824,7 +869,8 @@ def hitl_final_node(state: GraphState, runtime: AgentRuntime | None = None, conf
     """Milestone Reviewer 2：终稿审查。
 
     首次进入时 interrupt() 暂停图执行，等待用户输入。
-    用户输入 'approve' 完成，'retry' 回到建模阶段重新打磨。
+    用户输入 'approve' 完成（可附带 'score <0-100>' 把本次评价回写示例库），
+    'retry' 回到建模阶段重新打磨。
     """
     decision = interrupt({
         "stage": "final",
@@ -845,34 +891,76 @@ def hitl_final_node(state: GraphState, runtime: AgentRuntime | None = None, conf
         control.hitl_required = False
         control.hitl_stage = "none"
         control.rollback_source = "none"
-    return {"control": control}
+
+    result: dict = {"control": control}
+    # Exemplar 反馈回写：用户评分以滑动平均更新卡片/指南质量权重
+    score = action.get("score")
+    if score is not None:
+        resolved_runtime = _runtime(runtime)
+        context = state.get("exemplars", ExemplarContext())
+        if context.active:
+            from modeling_assistant.memory.exemplar_feedback import apply_feedback_to_context
+
+            updated = apply_feedback_to_context(
+                context, score, resolved_runtime.settings.feedback_alpha
+            )
+            result["exemplars"] = updated
+            # 持久化回写：更新卡片与指南文件，让反馈跨会话生效
+            try:
+                from modeling_assistant.data.exemplars import save_card, save_guide
+
+                cards_dir = resolved_runtime.settings.exemplars_dir / "cards"
+                for card in updated.cards:
+                    save_card(card, cards_dir)
+                if updated.guide is not None:
+                    save_guide(
+                        updated.guide,
+                        resolved_runtime.settings.exemplars_dir / "guides",
+                    )
+            except Exception as exc:
+                logger.warning("Exemplar 反馈落盘失败: %s", exc)
+            logger.info(
+                "Exemplar 反馈回写：score=%.2f，alpha=%.2f",
+                score,
+                resolved_runtime.settings.feedback_alpha,
+            )
+    return result
 
 
 def _parse_hitl_decision(decision) -> dict:
     """解析用户输入，支持字符串和字典两种 resume 格式。"""
+    score: float | None = None
     if isinstance(decision, dict):
+        raw_score = decision.get("score")
+        if isinstance(raw_score, (int, float)):
+            score = float(raw_score) / 100.0 if raw_score > 1 else float(raw_score)
         return {
             "type": decision.get("action", "approve"),
             "version": decision.get("version"),
+            "score": score,
         }
     text = str(decision).strip().lower()
+    score_match = re.search(r"score\s+(\d+(?:\.\d+)?)", text)
+    if score_match:
+        raw_score = float(score_match.group(1))
+        score = raw_score / 100.0 if raw_score > 1 else raw_score
     if text.startswith("rollback"):
         parts = text.split()
         version = parts[1] if len(parts) > 1 else None
-        return {"type": "rollback", "version": version}
+        return {"type": "rollback", "version": version, "score": score}
     if text.startswith("retry"):
         parts = text.split()
         version = parts[1] if len(parts) > 1 else None
-        return {"type": "retry", "version": version}
+        return {"type": "retry", "version": version, "score": score}
     if text.startswith("reject"):
-        return {"type": "reject"}
+        return {"type": "reject", "version": None, "score": score}
     if text.startswith("redirect"):
         parts = text.split(maxsplit=1)
         hint = parts[1] if len(parts) > 1 else ""
-        return {"type": "redirect", "version": hint}
+        return {"type": "redirect", "version": hint, "score": score}
     if text.startswith("accept"):
-        return {"type": "accept"}
-    return {"type": "approve"}
+        return {"type": "accept", "version": None, "score": score}
+    return {"type": "approve", "version": None, "score": score}
 
 
 def architect_node(state: GraphState, runtime: AgentRuntime | None = None, config: dict | None = None) -> GraphState:
@@ -1675,6 +1763,18 @@ def writer_node(state: GraphState, runtime: AgentRuntime | None = None, config: 
         latex_path = Path(resolved_runtime.output_path("paper", "main.tex"))
         if response.latex_content:
             resolved_runtime.write_file("paper", "main.tex", content=response.latex_content)
+            # Exemplar 查重护栏：检测是否整句复制了示例库表达
+            from modeling_assistant.validation.originality import check_writer_output
+
+            warnings = check_writer_output(
+                response.latex_content,
+                state.get("exemplars"),
+                n=resolved_runtime.settings.plagiarism_ngram,
+                threshold=resolved_runtime.settings.plagiarism_threshold,
+            )
+            if warnings:
+                audit["exemplar_originality_warning"] = "\n".join(warnings)
+                logger.warning("Exemplar 查重护栏告警：%s", warnings)
             # 尝试编译 PDF
             pdf_path = _compile_latex_to_pdf(latex_path, latex_path.parent)
             if pdf_path:

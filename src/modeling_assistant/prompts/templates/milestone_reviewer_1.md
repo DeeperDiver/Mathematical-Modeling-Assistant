@@ -11,6 +11,13 @@
 3. equations 与 objective 一致，能支撑解题目标。
 4. 没有引入静态 LTM 中未提及的新约束或新变量。
 
+5. 【表达完整性（弱检查，exemplar_active={exemplar_active}）】若提供了题型结构参考，
+   可对照检查动态 LTM 的 solution_outline 是否覆盖参考骨架中的核心章节
+   （如问题重述/模型建立/模型求解/结果分析）；缺失时在 feedback 中提示，不作为硬拒绝。
+
+题型结构参考：
+{exemplar_structure_json}
+
 静态 LTM：
 {static_ltm_json}
 

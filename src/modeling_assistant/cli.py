@@ -11,7 +11,13 @@ from langgraph.types import Command
 from modeling_assistant.agents.runtime import AgentRuntime
 from modeling_assistant.config import load_settings
 from modeling_assistant.graph.builder import build_graph
-from modeling_assistant.schemas.state import ArtifactBundle, ControlState, DynamicLTM, StaticLTM
+from modeling_assistant.schemas.state import (
+    ArtifactBundle,
+    ControlState,
+    DynamicLTM,
+    ExemplarContext,
+    StaticLTM,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +99,11 @@ def main() -> None:
     parser.add_argument("--llm-model", default=None, help="Override MODELING_ASSISTANT_LLM_MODEL.")
     parser.add_argument("--api-base-url", default=None, help="Override MODELING_ASSISTANT_API_BASE_URL.")
     parser.add_argument("--output-dir", default=None, help="Override MODELING_ASSISTANT_OUTPUT_DIR.")
+    parser.add_argument(
+        "--exemplars-dir",
+        default=None,
+        help="Override MODELING_ASSISTANT_EXEMPLARS_DIR (优秀论文知识库目录).",
+    )
     parser.add_argument("--auto-approve", action="store_true", help="Auto-approve all HITL checkpoints (no pause).")
     args = parser.parse_args()
 
@@ -103,6 +114,8 @@ def main() -> None:
         overrides["api_base_url"] = args.api_base_url
     if args.output_dir:
         overrides["output_dir"] = Path(args.output_dir)
+    if args.exemplars_dir:
+        overrides["exemplars_dir"] = Path(args.exemplars_dir)
     settings = load_settings(args.env_file, **overrides)
     runtime = AgentRuntime.from_settings(settings)
     app = build_graph(runtime=runtime)
@@ -114,6 +127,7 @@ def main() -> None:
         "ltm_archive": [],
         "control": ControlState(),
         "artifacts": ArtifactBundle(),
+        "exemplars": ExemplarContext(),
         "prompt_audit": {},
     }
 
