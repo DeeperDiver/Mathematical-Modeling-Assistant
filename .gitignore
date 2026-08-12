@@ -32,7 +32,5 @@ outputs*/
 test_write.tmp
 *.tmp
 
-# real_test 端到端测试题目与运行脚本
-real_test*/
-real_test.md
-run_real_test*.py
+# 实例测试（题目、附件与端到端运行脚本及其输出）
+real_tests/
