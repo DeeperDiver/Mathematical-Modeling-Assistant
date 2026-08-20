@@ -45,6 +45,18 @@ INTERNAL_PATH_MARKERS = [
 # 允许的图片引用前缀（相对 paper/ 目录）
 _ALLOWED_IMAGE_PREFIXES = ("../figures/", "figures/", "./figures/")
 
+# V18 承重契约对账：实验类型 → 论文中必须出现的标记
+_EXPERIMENT_KEYWORDS = {
+    "calibration": ("校准", "标定", "基准", "真值"),
+    "perturbation": ("扰动", "敏感性", "灵敏度", "扫描"),
+    "cross_check": ("交叉", "复核", "独立验证", "对照"),
+    "contrast": ("对照", "有无", "对比"),
+    "case_study": ("案例", "典型", "边界", "极端"),
+    "artifact": ("示意图", "可视化", "分区", "实物", "照片", "重建"),
+}
+_ANCHOR_KEYWORDS = ("锚点", "分区", "示意", "可视化", "绑定")
+_FALLBACK_KEYWORDS = ("兜底", "边界", "对照", "案例", "极端", "反例", "翻转")
+
 
 def _read_text(path: Path) -> str:
     try:
@@ -94,6 +106,26 @@ def _check_section_headers(sections_dir: Path) -> list[str]:
             continue
         if not re.search(r"\\section\s*\{", text):
             issues.append(f"章节文件缺少一级标题 \\section{{...}}：{path.name}")
+    return issues
+
+
+def _check_problem_summaries(sections_dir: Path) -> list[str]:
+    """每个问题章节必须以「问题小结」收尾（承上启下，说明本题贡献）。
+
+    Writer 输出约定：`5_problemN.tex` 等建模章节的最后一节为
+    `\subsection{问题小结}`（做了什么 → 得到什么 → 对下一题的支撑）。
+    这里只做确定性存在性检查；内容质量由 final_reviewer 的 LLM 审查把关。
+    """
+    issues: list[str] = []
+    if not sections_dir.exists():
+        return [f"章节目录缺失：{sections_dir}"]
+    for path in sorted(sections_dir.glob("*_problem*.tex")):
+        text = _read_text(path)
+        if "问题小结" not in text:
+            issues.append(
+                f"{path.name} 缺少「问题小结」收尾：每个问题章节末尾必须包含 "
+                "\\subsection{问题小结}，写清「本题做了什么 → 得到什么 → 对下一题的支撑」。"
+            )
     return issues
 
 
@@ -208,6 +240,113 @@ def _check_unresolved_refs(tex_files: list[Path]) -> list[str]:
         if name not in labels:
             issues.append(f"{fname}: 引用未定义的 \\label {{{name}}}（将渲染为 ??）")
     return issues[:20]
+
+
+def _check_unresolved_cites(tex_files: list[Path]) -> list[str]:
+    r"""检测 \cite{...} 引用了不存在的 \bibitem（可能渲染为 [?]）。
+
+    与 \ref 断链同源：参考文献是占位/缺失时，引用也会变成问号占位。
+    """
+    bibitems: set[str] = set()
+    refs: list[tuple[str, str]] = []
+    for tex_file in tex_files:
+        text = _read_text(tex_file)
+        bibitems.update(re.findall(r"\\bibitem\{([^}]+)\}", text))
+        for m in re.finditer(r"\\cite\{([^}]+)\}", text):
+            for name in m.group(1).split(","):
+                name = name.strip()
+                if name:
+                    refs.append((tex_file.name, name))
+    issues = [
+        f"{fname}: \\cite{{{name}}} 无对应 \\bibitem（将渲染为 [?]）"
+        for fname, name in refs
+        if name not in bibitems
+    ]
+    return issues[:20]
+
+
+def _check_load_bearing_contract(
+    root: Path,
+    figures_plan: list[dict] | None,
+    figure_manifest: dict | None,
+    load_bearing_map,
+) -> tuple[list[str], list[str]]:
+    """V18 承重契约对账（确定性）。
+
+    - 契约 required item：验收锚点章节存在，且出现对应实验类型的标记；
+    - anchor_gaps 构造：论文有可视化或显式锚点论证，二者必居其一；
+    - fallback_required 结论：论文出现兜底/边界/对照/案例类表述。
+    降级分析（analysis_incomplete）时只记警告，不阻塞。
+    """
+    issues: list[str] = []
+    warnings: list[str] = []
+    if load_bearing_map is None:
+        return issues, warnings
+    if isinstance(load_bearing_map, dict):
+        try:
+            from modeling_assistant.schemas.state import LoadBearingMap
+
+            load_bearing_map = LoadBearingMap.model_validate(load_bearing_map)
+        except Exception:
+            return issues, warnings
+
+    if load_bearing_map.analysis_incomplete:
+        warnings.append(
+            "承重图为降级分析（analysis_incomplete），承重契约检查降级为警告"
+        )
+
+    tex_files: list[Path] = []
+    main_tex = root / "main.tex"
+    if main_tex.exists():
+        tex_files.append(main_tex)
+    sections_dir = root / "sections"
+    if sections_dir.exists():
+        tex_files.extend(sorted(sections_dir.glob("*.tex")))
+    full_text = "\n".join(_read_text(f) for f in tex_files)
+
+    anchors = load_bearing_map.contract.acceptance_anchors or {}
+    for item in load_bearing_map.contract.required_items:
+        section = anchors.get(item.id, "8_sensitivity.tex")
+        path = root / "sections" / section
+        text = _read_text(path) if path.exists() else ""
+        if not path.exists():
+            issues.append(
+                f"承重契约：构造 {item.construct} 的验证锚点章节缺失 {section}"
+            )
+            continue
+        # 剔除章节标题行，避免标题自带关键词（如"敏感性分析"）造成空内容误通过
+        body = re.sub(r"\\section\s*\{[^}]*\}", "", text)
+        keywords = _EXPERIMENT_KEYWORDS.get(item.required_experiment, ())
+        if keywords and not any(kw in body for kw in keywords):
+            issues.append(
+                f"承重契约：{item.construct} 在 {section} 中未出现"
+                f"「{item.required_experiment}」类验证表述（{keywords[0]} 等）"
+            )
+
+    if not load_bearing_map.analysis_incomplete:
+        for item in load_bearing_map.constructs:
+            if item.physical_anchor:
+                continue
+            has_any_figure = any(
+                Path(entry.get("path", "")).name in full_text
+                for entry in (figure_manifest or {}).values()
+                if entry.get("status") == "generated"
+            )
+            if not has_any_figure and not any(kw in full_text for kw in _ANCHOR_KEYWORDS):
+                issues.append(
+                    f"承重契约：无物理锚点的构造 {item.construct} "
+                    "既无可视化，也未给出显式锚点论证"
+                )
+
+        for conclusion in load_bearing_map.conclusions:
+            if conclusion.fallback_required and not any(
+                kw in full_text for kw in _FALLBACK_KEYWORDS
+            ):
+                issues.append(
+                    f"承重契约：结论 {conclusion.id} 要求兜底/边界对照"
+                    "（fallback_required），但论文未出现相关表述"
+                )
+    return issues, warnings
 
 
 def _check_figure_completeness(
@@ -325,6 +464,7 @@ def check_paper(
     results_root: str | Path | None = None,
     figures_plan: list[dict] | None = None,
     figure_manifest: dict | None = None,
+    load_bearing_map=None,
 ) -> dict:
     """对论文目录做确定性验收，返回报告 dict。
 
@@ -337,6 +477,8 @@ def check_paper(
         figures_plan: V17 图表规划（FigurePlan 的 dict 列表）；提供时执行
             图表完整性检查（规划→生成→引用），缺省跳过。
         figure_manifest: V17 图表注册表（plan_id -> {path, status}）。
+        load_bearing_map: V18 承重图（LoadBearingMap 或其 dict），提供时执行
+            承重契约对账（根构造验证锚点、锚点缺口可视化/论证、结论形态兜底）。
 
     Returns:
         {
@@ -357,6 +499,12 @@ def check_paper(
     checks["入口"] = "存在" if main_tex.exists() else "缺失"
     issues.extend(_check_input_files(main_tex))
     issues.extend(_check_section_headers(sections_dir))
+    summary_issues = _check_problem_summaries(sections_dir)
+    if summary_issues:
+        checks["问题小结"] = f"{len(summary_issues)} 个问题章节缺失"
+        issues.extend(summary_issues)
+    else:
+        checks["问题小结"] = "通过"
 
     # 2. 占位符与泄露（正文 = main + sections + references）
     tex_files = []
@@ -383,8 +531,8 @@ def check_paper(
     else:
         checks["内部泄露"] = "无"
 
-    # 2.1 引用完整性（V17）：\ref/\eqref 必须有对应 \label
-    ref_issues = _check_unresolved_refs(tex_files)
+    # 2.1 引用完整性：\ref/\eqref 必须有对应 \label，\cite 必须有 \bibitem
+    ref_issues = _check_unresolved_refs(tex_files) + _check_unresolved_cites(tex_files)
     if ref_issues:
         checks["引用完整性"] = f"{len(ref_issues)} 处断链"
         issues.extend(ref_issues)
@@ -447,6 +595,20 @@ def check_paper(
         warnings.extend(fig_warnings)
     else:
         checks["图表完整性"] = "跳过（未提供 figures_plan）"
+
+    # 3.5 承重契约对账（V18）
+    if load_bearing_map is not None:
+        lb_issues, lb_warnings = _check_load_bearing_contract(
+            root, figures_plan, figure_manifest, load_bearing_map
+        )
+        if lb_issues:
+            checks["承重契约"] = f"{len(lb_issues)} 处缺项"
+            issues.extend(lb_issues)
+        else:
+            checks["承重契约"] = "通过"
+        warnings.extend(lb_warnings)
+    else:
+        checks["承重契约"] = "跳过（未提供承重图）"
 
     # 4. 编译
     if compile_pdf and main_tex.exists():

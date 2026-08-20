@@ -235,3 +235,39 @@ class MetaRouterResponse(BaseModel):
     reasoning: str = ""  # 决策理由（便于审计）
     direction_hint: str = ""  # 给下游节点的方向提示（注入 prompt，不强制采纳）
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+
+
+class LoadBearingConstruct(BaseModel):
+    """承重分析器 LLM 输出的单条构造语义（验证状态/承重度/缺口由规则层计算）。"""
+
+    construct: str
+    construct_type: Literal[
+        "metric", "model", "method_library", "parameter",
+        "threshold", "abstract_structure", "assumption", "data_item",
+    ] = "parameter"
+    is_root: bool = False
+    physical_anchor: str = ""
+    risk_if_wrong: str = ""
+    required_experiment: Literal[
+        "calibration", "perturbation", "contrast", "cross_check",
+        "case_study", "artifact",
+    ] = "perturbation"
+
+
+class LoadBearingConclusion(BaseModel):
+    """承重分析器 LLM 输出的单条结论语义（兜底强制规则由规则层补充）。"""
+
+    question_ref: str
+    answer_type: Literal["verdict", "numeric", "scheme", "comparison", "ranking"] = "verdict"
+    verdict_shape: Literal["all_positive", "all_negative", "mixed", "conditional"] = "mixed"
+    construct_refs: list[str] = Field(default_factory=list)
+    fallback_required: bool = False
+    fallback_spec: str = ""
+
+
+class LoadBearingAnalysisResponse(BaseModel):
+    """承重分析器的结构化输出（语义层；规则层负责验证状态/承重度/缺口/契约）。"""
+
+    constructs: list[LoadBearingConstruct] = Field(default_factory=list)
+    conclusions: list[LoadBearingConclusion] = Field(default_factory=list)
+    reasoning: str = ""

@@ -1687,6 +1687,7 @@ def test_human_mode_graph_end_to_end(tmp_path, monkeypatch):
         ClarifierResponse,
         CoderResponse,
         DataIntelligenceResponse,
+        LoadBearingAnalysisResponse,
         MathematicianResponse,
         MilestoneReviewer1Response,
         PlanEvaluation,
@@ -1719,6 +1720,8 @@ def test_human_mode_graph_end_to_end(tmp_path, monkeypatch):
             return ClarifierResponse(assumptions=["a"], nomenclature={"x": "x"}, equations=["y=x"], objective="o", solution_outline="s", commit_summary="v")
         if name == "milestone_reviewer_1":
             return MilestoneReviewer1Response(approval=True, issues=[], feedback="ok")
+        if name == "load_bearing_analyzer":
+            return LoadBearingAnalysisResponse(constructs=[], conclusions=[], reasoning="ok")
         if name == "architect":
             return ArchitectResponse(
                 outline={"摘要": "a", "问题重述": "b", "模型建立": "c", "模型求解": "d", "结果分析": "e"},
@@ -1898,6 +1901,7 @@ def test_two_sub_questions_human_mode_end_to_end(tmp_path, monkeypatch):
         ClarifierResponse,
         CoderResponse,
         DataIntelligenceResponse,
+        LoadBearingAnalysisResponse,
         MathematicianResponse,
         MilestoneReviewer1Response,
         PlanEvaluation,
@@ -1932,6 +1936,8 @@ def test_two_sub_questions_human_mode_end_to_end(tmp_path, monkeypatch):
             return ClarifierResponse(assumptions=["a"], nomenclature={"x": "x"}, equations=["y=x"], objective="o", solution_outline="s", commit_summary="v")
         if name == "milestone_reviewer_1":
             return MilestoneReviewer1Response(approval=True, issues=[], feedback="ok")
+        if name == "load_bearing_analyzer":
+            return LoadBearingAnalysisResponse(constructs=[], conclusions=[], reasoning="ok")
         if name == "architect":
             return ArchitectResponse(
                 outline={"摘要": "a", "问题重述": "b", "模型建立": "c", "模型求解": "d", "结果分析": "e"},

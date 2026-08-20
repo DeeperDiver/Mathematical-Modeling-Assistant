@@ -94,6 +94,7 @@ class AppSettings(BaseModel):
             "meta_router": 4096,
             "searcher": 2048,
             "exemplar_type_judge": 2048,
+            "load_bearing_analyzer": 8192,
         }
     )
 

@@ -26,6 +26,7 @@ from modeling_assistant.agents.nodes import (
     hitl_implementation_human_node,
     hitl_implementation_review_node,
     hitl_modeling_node,
+    load_bearing_analyzer_node,
     mathematician_node,
     milestone_reviewer_1_node,
     problem_node,
@@ -142,6 +143,8 @@ def build_graph(runtime: AgentRuntime | None = None, *, checkpointer: InMemorySa
     graph.add_node("hitl_modeling", _bind_runtime(hitl_modeling_node, resolved_runtime))
     graph.add_node("clarifier", _bind_runtime(clarifier_node, resolved_runtime))
     graph.add_node("milestone_reviewer_1", _bind_runtime(milestone_reviewer_1_node, resolved_runtime))
+    # V18 承重结构分析：里程碑通过后、人审之前生成承重图与验证契约
+    graph.add_node("load_bearing_analyzer", _bind_runtime(load_bearing_analyzer_node, resolved_runtime))
     graph.add_node("hitl_architecture", _bind_runtime(hitl_architecture_node, resolved_runtime))
     # V13 编程手模式：实现架构人工审核 + 任务包分发 + 等待人工交付
     graph.add_node("hitl_implementation_review", _bind_runtime(hitl_implementation_review_node, resolved_runtime))
@@ -200,12 +203,17 @@ def build_graph(runtime: AgentRuntime | None = None, *, checkpointer: InMemorySa
     graph.add_conditional_edges(
         "milestone_reviewer_1",
         route_after_milestone_reviewer_1,
-        {"mathematician": "mathematician", "hitl_architecture": "hitl_architecture"},
+        {
+            "mathematician": "mathematician",
+            "hitl_architecture": "hitl_architecture",
+            "load_bearing_analyzer": "load_bearing_analyzer",
+        },
     )
+    graph.add_edge("load_bearing_analyzer", "hitl_architecture")
     graph.add_conditional_edges(
         "hitl_architecture",
         route_after_architecture_hitl,
-        {"rollback": "rollback", "architect": "architect"},
+        {"rollback": "rollback", "architect": "architect", "clarifier": "clarifier"},
     )
     graph.add_conditional_edges(
         "rollback",

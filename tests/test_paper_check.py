@@ -8,6 +8,8 @@ from modeling_assistant.validation.paper_check import (
     check_paper,
     _check_malformed_image_commands,
     _check_front_matter_placeholders,
+    _check_problem_summaries,
+    _check_unresolved_cites,
     _check_unresolved_refs,
     _find_placeholders,
     _find_internal_leaks,
@@ -79,6 +81,39 @@ def test_check_paper_fails_on_unresolved_ref(tmp_path):
     assert any("tab:nope" in i for i in report["issues"])
 
 
+def test_check_unresolved_cites_detects_missing_bibitem(tmp_path):
+    """V17：`\cite{x}` 无对应 `\bibitem{x}` → 断链硬错误。"""
+    tex = tmp_path / "bad.tex"
+    tex.write_text(
+        "\\section{问题}\n该方法见\\cite{ref9}。\n", encoding="utf-8"
+    )
+    issues = _check_unresolved_cites([tex])
+    assert issues
+    assert "ref9" in issues[0]
+
+
+def test_check_unresolved_cites_ok_when_bibitem_exists(tmp_path):
+    """存在对应 bibitem 的引用不应被误报。"""
+    tex = tmp_path / "good.tex"
+    tex.write_text(
+        "\\begin{thebibliography}{9}\n\\bibitem{ref1} 作者. 题名[J]. 刊名, 2024.\n"
+        "\\end{thebibliography}\n见\\cite{ref1}。\n",
+        encoding="utf-8",
+    )
+    assert _check_unresolved_cites([tex]) == []
+
+
+def test_check_paper_fails_on_unresolved_cite(tmp_path):
+    """check_paper 应把无 bibitem 的 cite 记为硬错误。"""
+    paper = _make_paper(tmp_path)
+    (paper / "sections" / "1_restatement.tex").write_text(
+        "\\section{问题重述}\n方法见\\cite{ref9}。\n", encoding="utf-8"
+    )
+    report = check_paper(paper, compile_pdf=False)
+    assert not report["passed"]
+    assert any("ref9" in i for i in report["issues"])
+
+
 def test_find_internal_leaks_detects_workflow_markers():
     """应检测 reports/ 等内部工作流标记。"""
     text = "模型结果见 reports/RESULTS_REPORT.md 与 coder_task.json。"
@@ -94,6 +129,49 @@ def test_check_paper_passes_clean_paper(tmp_path):
     assert report["passed"], report["issues"]
     assert report["checks"]["入口"] == "存在"
     assert report["checks"]["占位符"] == "无"
+
+
+def test_check_problem_summaries_detects_missing(tmp_path):
+    """V18：问题章节缺少「问题小结」收尾 → 硬错误。"""
+    (tmp_path / "sections").mkdir(parents=True)
+    (tmp_path / "sections" / "5_problem1.tex").write_text(
+        "\\section{问题一的模型建立与求解}\n求解结果：R²=0.896。\n",
+        encoding="utf-8",
+    )
+    issues = _check_problem_summaries(tmp_path / "sections")
+    assert len(issues) == 1
+    assert "5_problem1.tex" in issues[0]
+    assert "问题小结" in issues[0]
+
+
+def test_check_problem_summaries_passes_when_present(tmp_path):
+    """V18：问题章节含「问题小结」时通过。"""
+    (tmp_path / "sections").mkdir(parents=True)
+    (tmp_path / "sections" / "5_problem1.tex").write_text(
+        "\\section{问题一的模型建立与求解}\n求解结果：R²=0.896。\n"
+        "\\subsection{问题小结}\n本题建立对比模型并得到最优结果，"
+        "为下一题提供特征输入。\n",
+        encoding="utf-8",
+    )
+    assert _check_problem_summaries(tmp_path / "sections") == []
+
+
+def test_check_paper_fails_when_problem_summary_missing(tmp_path):
+    """V18：check_paper 应将缺「问题小结」的问题章节记为硬错误。"""
+    paper = tmp_path / "paper"
+    (paper / "sections").mkdir(parents=True)
+    (paper / "main.tex").write_text(
+        "\\documentclass{ctexart}\n\\begin{document}\n"
+        "\\input{sections/5_problem1}\n\\end{document}\n",
+        encoding="utf-8",
+    )
+    (paper / "sections" / "5_problem1.tex").write_text(
+        "\\section{问题一的模型建立与求解}\n求解结果。\n", encoding="utf-8"
+    )
+    report = check_paper(paper, compile_pdf=False)
+    assert not report["passed"]
+    assert report["checks"]["问题小结"] != "通过"
+    assert any("问题小结" in i for i in report["issues"])
 
 
 def test_check_paper_fails_on_placeholder(tmp_path):

@@ -169,6 +169,69 @@ class PlanCandidate(BaseModel):
         return w_inn * self.innovation_score + w_fea * self.feasibility_score
 
 
+# ── V18 承重结构分析（Load-Bearing Analysis）────────────────────────
+# 把「结论」与「结论所依赖的构造」显式连接成承重图，作为验证/论证/呈现
+# 要求的附着点。由 load_bearing_analyzer_node 生成，写入 artifacts.load_bearing_map，
+# 供 Architect 规划、Writer 呈现、final_reviewer 对账、hitl_architecture 人审。
+
+
+class ConstructItem(BaseModel):
+    """承重图中单条构造：结论所依赖的中间物（指标/方法库/模型/参数/阈值/抽象结构…）。"""
+
+    id: str
+    construct: str
+    construct_type: Literal[
+        "metric", "model", "method_library", "parameter",
+        "threshold", "abstract_structure", "assumption", "data_item",
+    ] = "parameter"
+    load_bearing: float = Field(default=0.5, ge=0.0, le=1.0)
+    is_root: bool = False
+    verification_status: Literal[
+        "machine_verified", "evidence_linked", "self_set", "unverified",
+    ] = "unverified"
+    evidence_run_ids: list[str] = Field(default_factory=list)
+    physical_anchor: str = ""
+    risk_if_wrong: str = ""
+    required_experiment: Literal[
+        "calibration", "perturbation", "contrast", "cross_check",
+        "case_study", "artifact",
+    ] = "perturbation"
+
+
+class ConclusionItem(BaseModel):
+    """承重图中单条结论：论文必须交付的答案（含结论形态与兜底要求）。"""
+
+    id: str
+    question_ref: str = ""
+    answer_type: Literal["verdict", "numeric", "scheme", "comparison", "ranking"] = "verdict"
+    verdict_shape: Literal["all_positive", "all_negative", "mixed", "conditional"] = "mixed"
+    load_bearing_construct_ids: list[str] = Field(default_factory=list)
+    fallback_required: bool = False
+    fallback_spec: str = ""
+
+
+class VerificationContract(BaseModel):
+    """由承重图派生的验证契约：按承重度排序的必做实验清单。"""
+
+    priority_order: list[str] = Field(default_factory=list)
+    required_items: list[ConstructItem] = Field(default_factory=list)
+    acceptance_anchors: dict[str, str] = Field(default_factory=dict)
+
+
+class LoadBearingMap(BaseModel):
+    """承重图：结论与承重依赖的显式连接（一等状态对象）。"""
+
+    conclusions: list[ConclusionItem] = Field(default_factory=list)
+    constructs: list[ConstructItem] = Field(default_factory=list)
+    contract: VerificationContract = Field(default_factory=VerificationContract)
+    root_gaps: list[str] = Field(default_factory=list)
+    anchor_gaps: list[str] = Field(default_factory=list)
+    shape_risks: list[str] = Field(default_factory=list)
+    ltm_version: str = ""
+    analysis_incomplete: bool = False
+    reasoning: str = ""
+
+
 class ArtifactBundle(BaseModel):
     outline: dict[str, str] = Field(default_factory=dict)
     pseudocode: list[str] = Field(default_factory=list)
@@ -196,6 +259,8 @@ class ArtifactBundle(BaseModel):
     figure_manifest: dict[str, dict[str, Any]] = Field(default_factory=dict)
     # V17：drawer 失败时置 True，清空 base.figure_manifest（与 clear_result_paths 对称）
     clear_figure_manifest: bool = False
+    # V18 承重图：结论→承重依赖的显式连接，验证/论证/呈现要求的附着点
+    load_bearing_map: LoadBearingMap | None = None
 
 
 def merge_artifacts_reducer(
@@ -239,6 +304,9 @@ def merge_artifacts_reducer(
     # 空契约 ResultContract() 表示"本轮明确无契约"（清掉旧契约）。
     if incoming.result_contract is not None:
         base.result_contract = incoming.result_contract
+    # V18 承重图：分析器每次提交整图，非空即替换（证据回流由 reconcile 负责）
+    if incoming.load_bearing_map is not None:
+        base.load_bearing_map = incoming.load_bearing_map
     # V13 新增：架构计划随 Architect 产物覆盖更新
     if incoming.algorithms_summary:
         base.algorithms_summary = incoming.algorithms_summary

@@ -253,6 +253,7 @@ def build_process_report(
             "coder",
             "result_reviewer",
             "reflection",
+            "load_bearing_analyzer",
             "sub_question_acceptance",
             "cross_sub_question",
             "hitl_modeling",

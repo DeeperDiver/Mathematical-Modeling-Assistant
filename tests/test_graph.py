@@ -14,6 +14,7 @@ from modeling_assistant.schemas.responses import (
     CoderResponse,
     DataIntelligenceResponse,
     DrawerResponse,
+    LoadBearingAnalysisResponse,
     MathematicianResponse,
     MilestoneReviewer1Response,
     PlanEvaluation,
@@ -92,6 +93,8 @@ def _mock_sub_question_runtime(monkeypatch, output_dir: Path, mode: str):
             return ClarifierResponse(assumptions=["a"], nomenclature={"x": "x"}, equations=["y=x"], objective="o", solution_outline="s", commit_summary="v")
         if name == "milestone_reviewer_1":
             return MilestoneReviewer1Response(approval=True, issues=[], feedback="ok")
+        if name == "load_bearing_analyzer":
+            return LoadBearingAnalysisResponse(constructs=[], conclusions=[], reasoning="ok")
         if name == "architect":
             return ArchitectResponse(
                 outline={"摘要": "a", "问题重述": "b", "模型建立": "c", "模型求解": "d", "结果分析": "e"},
@@ -474,6 +477,30 @@ def test_route_after_rollback_respects_source():
 
     state = {"control": ControlState(rollback_source="arbitration")}
     assert route_after_rollback(state) == "architect"
+
+
+def test_route_after_architecture_hitl_revise_goes_to_clarifier():
+    """V18：架构 HITL 人类打回假设（revise）→ 回 Clarifier 重新提炼。"""
+    from modeling_assistant.graph.routing import route_after_architecture_hitl
+
+    assert (
+        route_after_architecture_hitl(
+            {"control": ControlState(phase="architecture_revised")}
+        )
+        == "clarifier"
+    )
+    assert (
+        route_after_architecture_hitl(
+            {"control": ControlState(rollback_to_version="v1.0")}
+        )
+        == "rollback"
+    )
+    assert (
+        route_after_architecture_hitl(
+            {"control": ControlState(phase="architecture_approved")}
+        )
+        == "architect"
+    )
 
 
 def test_route_after_hitl_modeling_routes_by_decision():

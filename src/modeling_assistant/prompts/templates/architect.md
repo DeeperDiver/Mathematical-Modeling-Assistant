@@ -135,6 +135,38 @@
 - 8_sensitivity.tex 必须规划灵敏度/鲁棒性图；
 - 图表必须服务论文论证，不为凑数量而画；规划之外不得让 Drawer 随意加图。
 
+**关键假设扰动/对照实验（V18，必须规划，缺项会被终审验收打回）**：
+动态 LTM 中以 `【关键假设】` 标注的假设（以及你认为影响全局走向的其他关键假设），
+必须在规划阶段逐条给出**扰动或对照实验**，让论文能用实验证据回答
+「这条假设若不成立，结论还稳吗」：
+- 逐条列出关键假设 → 设计实验：参数扰动（如 ±10%/±20%）或 有无该假设的对照
+  （baseline vs. 去除/替换该假设的对照组）；
+- 每个实验必须在 `tables_plan` 或 `figures_plan` 中声明一个条目：
+  `section` 建议为 8_sensitivity.tex（或该假设直接影响的问题章节），
+  `content_spec` 写清对照组定义、扰动范围、比较指标与期望结论；
+- 在 `outline` 的「灵敏度分析/结果分析」中写明每个实验的结论将如何被引用
+  （写进哪个章节、支撑哪条结论），保证论文正文「实验 → 结论」成对出现；
+- 关键假设数量少（1~3 条）时逐条覆盖；数量多时优先覆盖决定模型结构与
+  结果量级的假设，并在 content_spec 中说明取舍理由。
+
+【承重结构分析（V18，必须遵守，缺项会被终审验收打回）】
+系统已生成承重图（load_bearing_active={load_bearing_active}），把每条结论与
+其承重依赖显式连接：
+承重图：
+{load_bearing_map_json}
+
+验证契约（按承重度排序，根构造优先）：
+{verification_contract_json}
+
+- 验证契约中的每条 required item 必须进入 figures_plan / tables_plan：
+  扰动/校准/交叉 → 8_sensitivity.tex；对照/案例/物证 → 对应问题章节。
+- 承重图中 anchor_gaps 的构造必须规划「把构造绑定到题目实体的可视化」，
+  或在该构造对应章节规划显式锚点论证（二选一，缺项即验收失败）。
+- 结论清单中 fallback_required=true 的结论必须规划边界探测/对照案例，
+  并在 outline 中写明兜底表述的落点。
+- 规划顺序以契约 priority_order 为准：先根构造、后叶子构造；禁止只对
+  显眼参数做敏感性而漏掉隐藏在公式背后的承重构造。
+
 `tables_plan`（结果表规划，V17）同样必须声明每张表的
 `id / title / columns / purpose / section / content_spec / required`，
 与 figures_plan 一起构成全文图表清单。

@@ -32,7 +32,9 @@ def _make_paper(tmp_path: Path, section_tex: str) -> Path:
         encoding="utf-8",
     )
     (paper / "sections" / "5_problem1.tex").write_text(
-        f"\\section{{问题}}\n{section_tex}\n", encoding="utf-8"
+        f"\\section{{问题}}\n{section_tex}\n"
+        "\\subsection{问题小结}\n本节完成问题分析，结果为后续问题提供支撑。\n",
+        encoding="utf-8",
     )
     return paper
 

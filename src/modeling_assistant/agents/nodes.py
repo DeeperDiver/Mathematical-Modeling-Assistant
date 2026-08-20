@@ -30,6 +30,7 @@ from modeling_assistant.schemas.responses import (
     DataIntelligenceResponse,
     DrawerResponse,
     FinalReviewerResponse,
+    LoadBearingAnalysisResponse,
     MathematicianResponse,
     MetaRouterResponse,
     MilestoneReviewer1Response,
@@ -118,6 +119,21 @@ def _dynamic_ltm(state: GraphState) -> DynamicLTM:
 
 def _artifacts(state: GraphState) -> ArtifactBundle:
     return state.get("artifacts", ArtifactBundle()).model_copy(deep=True)
+
+
+def _load_bearing_summary(state: GraphState) -> dict:
+    """供 HITL 载荷使用的承重图摘要。"""
+    artifacts = _artifacts(state)
+    m = artifacts.load_bearing_map
+    if m is None:
+        return {"present": False}
+    return {
+        "present": True,
+        "analysis_incomplete": m.analysis_incomplete,
+        "root_gaps": list(m.root_gaps),
+        "anchor_gaps": list(m.anchor_gaps),
+        "shape_risks": list(m.shape_risks),
+    }
 
 
 def _empirical(state: GraphState) -> EmpiricalLayer:
@@ -1226,17 +1242,113 @@ def milestone_reviewer_1_node(state: GraphState, runtime: AgentRuntime | None = 
     return {"control": control, "prompt_audit": audit, "process_log": [entry]}
 
 
+def load_bearing_analyzer_node(
+    state: GraphState,
+    runtime: AgentRuntime | None = None,
+    config: dict | None = None,
+) -> GraphState:
+    """承重结构分析（V18）：把结论与承重依赖显式连接，生成验证契约。
+
+    在 milestone_reviewer_1 通过后、hitl_architecture 之前运行。输出
+    LoadBearingMap 写入 artifacts.load_bearing_map，供人类审核、Architect
+    规划、Writer 呈现、final_reviewer 对账。LLM 失败时降级为纯规则保守图，
+    并标记 analysis_incomplete，不允许"未分析"静默通过。
+    """
+    from modeling_assistant.analysis.load_bearing import build_load_bearing_map
+
+    resolved_runtime = _runtime(runtime)
+    control = _control(state)
+    dynamic_ltm = _dynamic_ltm(state)
+    static_ltm = _static_ltm(state)
+    empirical = _empirical(state)
+    artifacts = _artifacts(state)
+
+    archive = state.get("ltm_archive", [])
+    ltm_version = archive[-1].version if archive else "v0.0"
+    response = None
+    audit: dict[str, str] = {}
+    system_prompt = ""
+    try:
+        system_prompt, audit = _prompt_audit("load_bearing_analyzer", state, runtime)
+        response = resolved_runtime.invoke_structured(
+            "load_bearing_analyzer",
+            state,
+            LoadBearingAnalysisResponse,
+            system_prompt=system_prompt,
+        )
+    except Exception as exc:
+        logger.warning("承重分析 LLM 调用失败，降级为纯规则保守图: %s", exc)
+
+    load_bearing_map = build_load_bearing_map(
+        dynamic_ltm,
+        static_ltm,
+        empirical,
+        control,
+        response=response,
+        ltm_version=ltm_version,
+    )
+    artifacts.load_bearing_map = load_bearing_map
+    control.phase = "load_bearing_analyzed"
+    entry = _emit_process(
+        runtime,
+        control,
+        state,
+        "load_bearing_analyzer",
+        "load_bearing_analyzed",
+        (
+            f"承重分析完成：{len(load_bearing_map.constructs)} 个构造，"
+            f"根缺口 {len(load_bearing_map.root_gaps)}，"
+            f"锚点缺口 {len(load_bearing_map.anchor_gaps)}，"
+            f"形态风险 {len(load_bearing_map.shape_risks)}"
+        ),
+        {
+            "ltm_version": ltm_version,
+            "analysis_incomplete": load_bearing_map.analysis_incomplete,
+            "root_gaps": list(load_bearing_map.root_gaps),
+            "anchor_gaps": list(load_bearing_map.anchor_gaps),
+            "shape_risks": list(load_bearing_map.shape_risks),
+            "conclusions": [
+                {
+                    "id": v.id,
+                    "question_ref": v.question_ref,
+                    "verdict_shape": v.verdict_shape,
+                    "fallback_required": v.fallback_required,
+                }
+                for v in load_bearing_map.conclusions
+            ],
+        },
+        prompt_text=system_prompt if response is not None else None,
+    )
+    return {
+        "artifacts": artifacts,
+        "control": control,
+        "prompt_audit": audit,
+        "process_log": [entry],
+    }
+
+
 def hitl_architecture_node(state: GraphState, runtime: AgentRuntime | None = None, config: dict | None = None) -> GraphState:
     """Milestone Reviewer 1：架构确认前的人类审核。
 
     首次进入时 interrupt() 暂停图执行，等待用户输入。
-    用户输入 'approve' 继续，'rollback <version>' 回滚。
+    重点审核对象是 Clarifier 提出的模型假设（可能影响全局走向的关键假设已在
+    assumptions 中以【关键假设】标注）。用户输入：
+    - 'approve' 放行进入架构设计
+    - 'rollback <version>' 回滚到指定 LTM 版本
+    - 'revise <假设反馈>' 打回 Clarifier 按反馈修改假设后重新评审
     """
+    dynamic_ltm = _dynamic_ltm(state)
     decision = interrupt({
         "stage": "architecture",
-        "message": "请审核当前建模方案。",
-        "hint": "输入 'approve' 放行进入架构设计，或 'rollback v1.0' 回滚到指定版本。",
-        "dynamic_ltm": _dynamic_ltm(state).model_dump(),
+        "message": "请审核当前建模方案，重点逐条审核模型假设（假设必须审慎、有依据）。",
+        "hint": (
+            "输入 'approve' 放行进入架构设计；"
+            "'rollback v1.0' 回滚到指定版本；"
+            "'revise <反馈>' 打回 Clarifier 按反馈修改假设。"
+        ),
+        "assumptions": list(dynamic_ltm.assumptions or []),
+        "dynamic_ltm": dynamic_ltm.model_dump(),
+        "load_bearing_summary": _load_bearing_summary(state),
         "control_summary": {
             "phase": state.get("control", ControlState()).phase,
             "selected_plan_id": state.get("control", ControlState()).selected_plan_id,
@@ -1252,6 +1364,19 @@ def hitl_architecture_node(state: GraphState, runtime: AgentRuntime | None = Non
         control.rollback_to_version = action.get("version")
         control.rollback_source = "architecture_hitl"
         control.phase = "hitl_rollback_requested"
+    elif action["type"] == "revise":
+        # 人类要求修改假设：携带反馈回 Clarifier 重新提炼 LTM（不进建模发散）
+        control.hitl_required = False
+        control.hitl_stage = "none"
+        control.rollback_source = "none"
+        control.phase = "architecture_revised"
+        feedback = action.get("version") or ""
+        if feedback:
+            control.rebrainstorm_feedback.append(f"人类架构审核（假设）反馈：{feedback}")
+        logger.info(
+            "架构 HITL：人类打回假设并要求修改（反馈=%s），回 Clarifier 重新提炼",
+            feedback[:120],
+        )
     else:
         control.phase = "architecture_approved"
         control.hitl_required = False
@@ -1262,11 +1387,16 @@ def hitl_architecture_node(state: GraphState, runtime: AgentRuntime | None = Non
         (
             f"人类回滚到 {control.rollback_to_version}"
             if action["type"] == "rollback"
-            else "人类批准建模方案，进入架构设计"
+            else (
+                "人类打回假设并要求修改，回 Clarifier 重新提炼"
+                if action["type"] == "revise"
+                else "人类批准建模方案（含假设），进入架构设计"
+            )
         ),
         {
             "decision": action["type"],
             "version": action.get("version"),
+            "feedback": action.get("version"),
             "selected_plan_id": control.selected_plan_id,
             "innovation_score": control.innovation_score,
             "feasibility_score": control.feasibility_score,
@@ -3331,6 +3461,15 @@ def final_reviewer_node(state: GraphState, runtime: AgentRuntime | None = None, 
         entry.model_dump(mode="json")
         for entry in (control.results_manifest or [])
     ] or None
+    # V18：执行证据回流后按承重契约验收（root_gaps/anchor_gaps/形态兜底）
+    load_bearing_map = None
+    if artifacts.load_bearing_map is not None:
+        from modeling_assistant.analysis.load_bearing import reconcile_load_bearing_map
+
+        load_bearing_map = reconcile_load_bearing_map(
+            artifacts.load_bearing_map,
+            state.get("empirical", EmpiricalLayer()),
+        )
     deterministic = check_paper(
         paper_dir,
         manifest=manifest,
@@ -3340,6 +3479,7 @@ def final_reviewer_node(state: GraphState, runtime: AgentRuntime | None = None, 
         ]
         or None,
         figure_manifest=dict(artifacts.figure_manifest or {}),
+        load_bearing_map=load_bearing_map,
     )
     control.paper_review_report = dict(deterministic)
     audit = {

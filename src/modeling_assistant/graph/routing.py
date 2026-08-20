@@ -190,10 +190,19 @@ def route_after_reflection(state: GraphState) -> Literal["clarifier", "collect_a
     return "collect_artifacts"
 
 
-def route_after_architecture_hitl(state: GraphState) -> Literal["rollback", "architect"]:
+def route_after_architecture_hitl(state: GraphState) -> Literal["rollback", "architect", "clarifier"]:
+    """架构 HITL 之后的路由。
+
+    - rollback_to_version → rollback（版本回滚）
+    - architecture_revised（人类打回假设并要求修改）→ clarifier 重新提炼 LTM
+    - 其余（approve）→ architect
+    """
     control = state["control"]
     if control.rollback_to_version:
         return "rollback"
+    if control.phase == "architecture_revised":
+        logger.info("架构 HITL：人类要求修改假设，回 Clarifier 重新提炼")
+        return "clarifier"
     return "architect"
 
 
@@ -227,7 +236,12 @@ def route_after_hitl_modeling(
 
 def route_after_milestone_reviewer_1(
     state: GraphState,
-) -> Literal["mathematician", "hitl_architecture"]:
+) -> Literal["mathematician", "hitl_architecture", "load_bearing_analyzer"]:
+    """Milestone Reviewer 1 之后的路由。
+
+    - 通过 → load_bearing_analyzer（V18：先做承重结构分析，再进入人审）
+    - 拒绝 → mathematician；预算耗尽 → hitl_architecture（人类决断）
+    """
     control = state["control"]
     if control.need_rebrainstorm:
         # 预算耗尽 → 强制放行到 HITL，让人类决断
@@ -238,7 +252,7 @@ def route_after_milestone_reviewer_1(
             )
             return "hitl_architecture"
         return "mathematician"
-    return "hitl_architecture"
+    return "load_bearing_analyzer"
 
 
 def route_after_final_review(state: GraphState) -> Literal["rollback", "hitl_final", "writer"]:

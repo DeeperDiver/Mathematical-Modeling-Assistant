@@ -64,3 +64,14 @@ def test_writer_prompt_empty_manifest_renders():
     prompt = _render_writer(ControlState())
     assert "结果文件预览（按章节绑定" in prompt
     assert "结果文件预览（旧平铺" in prompt
+
+
+def test_writer_prompt_table_label_requirements():
+    """Writer 指令应统一为带 label 的三线表写法，并给出示例。"""
+    prompt = _render_writer(ControlState())
+    # 新写法 + 示例
+    assert "\\threelinetable[label]" in prompt
+    assert "`label` 必填" in prompt
+    assert "tab:p1_params" in prompt
+    # 不应再出现旧的无 label 4 参写法指令
+    assert "\\threelinetable{{表题}}{{列格式}}{{表头}}{{内容}}" not in prompt

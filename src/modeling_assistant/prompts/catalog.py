@@ -148,12 +148,35 @@ class PromptContext:
         section_result_binding_json = "{}"
         # V17 图表注册表（Writer 只允许引用 manifest 中已生成的图）
         figure_manifest_json = "{}"
+        # V18 承重图：结论→承重依赖的显式连接，按角色切片注入
+        load_bearing_active = "false"
+        load_bearing_map_json = "{}"
+        verification_contract_json = "{}"
+        conclusion_inventory_json = "[]"
+        load_bearing_gaps_json = "[]"
         if self.artifacts is not None:
             fm = getattr(self.artifacts, "figure_manifest", None)
             if isinstance(fm, BaseModel):
                 fm = fm.model_dump(mode="json")
             if isinstance(fm, dict):
                 figure_manifest_json = json.dumps(fm, ensure_ascii=False, indent=2)
+            lbm = getattr(self.artifacts, "load_bearing_map", None)
+            if isinstance(lbm, BaseModel):
+                lbm = lbm.model_dump(mode="json")
+            if isinstance(lbm, dict) and lbm:
+                load_bearing_active = "true"
+                load_bearing_map_json = json.dumps(lbm, ensure_ascii=False, indent=2)
+                verification_contract_json = json.dumps(
+                    lbm.get("contract") or {}, ensure_ascii=False, indent=2
+                )
+                conclusion_inventory_json = json.dumps(
+                    lbm.get("conclusions") or [], ensure_ascii=False, indent=2
+                )
+                gaps: list[str] = []
+                gaps.extend(lbm.get("root_gaps") or [])
+                gaps.extend(lbm.get("anchor_gaps") or [])
+                gaps.extend(lbm.get("shape_risks") or [])
+                load_bearing_gaps_json = json.dumps(gaps, ensure_ascii=False, indent=2)
         if self.control is not None:
             ctrl_data = self.control.model_dump(mode="json")
             questions = ctrl_data.get("sub_questions", []) or []
@@ -638,6 +661,12 @@ class PromptContext:
             "section_result_binding_json": section_result_binding_json,
             # V17 图表注册表
             "figure_manifest_json": figure_manifest_json,
+            # V18 承重图
+            "load_bearing_active": load_bearing_active,
+            "load_bearing_map_json": load_bearing_map_json,
+            "verification_contract_json": verification_contract_json,
+            "conclusion_inventory_json": conclusion_inventory_json,
+            "load_bearing_gaps_json": load_bearing_gaps_json,
             # V11 修复：机器生成的字符串列解析建议
             "data_parse_hints_json": data_parse_hints_json,
             # V12 修复：结果契约

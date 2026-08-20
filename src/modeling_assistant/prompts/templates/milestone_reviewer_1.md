@@ -14,12 +14,19 @@
 5. 【假设质量参考（弱检查，method_knowledge_active={method_knowledge_active}）】对照以下
    假设与模型建立规范，检查 assumptions 是否必要、可解释、可参数化、物理/业务约束是否
    优先于拟合好看；明显违反时在 feedback 中提示，不作为硬拒绝。
+   另外检查：假设是否审慎（是否把强设定默认成事实）、可能影响全局走向的假设是否以
+   `【关键假设】` 标注并写明依据/风险/可验证性（供人类审核与扰动/对照实验规划）；
+   关键假设漏标或表述模糊时在 feedback 中提示。
 
 {assumption_knowledge}
 
 6. 【表达完整性（弱检查，exemplar_active={exemplar_active}）】若提供了题型结构参考，
    可对照检查动态 LTM 的 solution_outline 是否覆盖参考骨架中的核心章节
    （如问题重述/模型建立/模型求解/结果分析）；缺失时在 feedback 中提示，不作为硬拒绝。
+
+7. 【承重构造可见性（弱检查）】承重构造（指标、方法库、抽象结构等）必须在
+   nomenclature 或 equations 中显式定义，不得以「某个评价/某个度量」这类黑箱
+   表述出现；明显黑箱时在 feedback 中提示，不作为硬拒绝。
 
 题型结构参考：
 {exemplar_structure_json}
