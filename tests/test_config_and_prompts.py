@@ -63,6 +63,29 @@ def test_default_search_enabled():
     assert settings.search_enabled is True
 
 
+def test_llm_max_tokens_overrides_from_env(monkeypatch):
+    """V17：MODELING_ASSISTANT_LLM_MAX_TOKENS_OVERRIDES 应按节点覆盖输出上限。"""
+    monkeypatch.setenv(
+        "MODELING_ASSISTANT_LLM_MAX_TOKENS_OVERRIDES",
+        '{"writer": 20000, "arbiter": 3000}',
+    )
+    settings = load_settings()
+    assert settings.max_tokens_for("writer") == 20000
+    assert settings.max_tokens_for("arbiter") == 3000
+    # 未覆盖节点保留默认覆盖/全局默认
+    assert settings.max_tokens_for("coder") == 32768
+    assert settings.max_tokens_for("no_such_node") == settings.llm_max_tokens
+
+
+def test_llm_max_tokens_overrides_defaults():
+    """V17：默认覆盖表中长输出节点保持大上限，小节点被压低。"""
+    settings = load_settings()
+    assert settings.max_tokens_for("writer") == 32768
+    assert settings.max_tokens_for("clarifier") == 24576
+    assert settings.max_tokens_for("arbiter") == 4096
+    assert settings.max_tokens_for("searcher") == 2048
+
+
 def test_prompt_catalog_renders_ltm_without_history():
     prompt = PromptCatalog().render(
         "coder",
@@ -306,12 +329,8 @@ def test_route_after_coder_success_phase_goes_to_result_reviewer():
     assert route_after_coder(state) == "result_reviewer"
 
 
-def test_route_after_result_reviewer_always_goes_to_reflection():
-    """V9 修复：route_after_result_reviewer 不论成功失败都走 reflection 消费 budget。
-
-    场景：ResultReviewer 失败时不直接回退到 architect/clarifier，而是走 reflection
-    消费 budget，避免死循环。
-    """
+def test_route_after_result_reviewer_routes_to_acceptance_on_pass():
+    """V14：ResultReviewer 通过 → 小题人工验收；失败 → reflection 消费预算。"""
     from modeling_assistant.graph.routing import route_after_result_reviewer
     from modeling_assistant.schemas.state import ControlState, GraphState
 
@@ -321,11 +340,11 @@ def test_route_after_result_reviewer_always_goes_to_reflection():
     }
     assert route_after_result_reviewer(state_failed) == "reflection"
 
-    # 成功 phase
+    # 成功 phase：V14 改为进入小题人工验收闸门
     state_passed: GraphState = {
         "control": ControlState(phase="result_review_passed"),
     }
-    assert route_after_result_reviewer(state_passed) == "reflection"
+    assert route_after_result_reviewer(state_passed) == "sub_question_acceptance"
 
 
 def test_drawer_prompt_renders_recent_stderr_for_self_repair():
@@ -405,6 +424,49 @@ def test_writer_prompt_renders_result_preview():
     )
     assert "结果文件预览" in prompt
     assert "optimal_week" in prompt
+
+
+def test_prompt_catalog_data_columns_grouped_by_file():
+    """V16：data_columns_json 应按文件分组并含样例值，而非扁平合并。"""
+    from modeling_assistant.schemas.state import ColumnProfile, DataProfile, FileSummary
+
+    profile = DataProfile(
+        file_summaries=[
+            FileSummary(
+                path="订单信息.xlsx",
+                rows=3,
+                cols=2,
+                columns=[
+                    ColumnProfile(name="客户编号", dtype="int", sample_values=["1", "2"]),
+                    ColumnProfile(name="需求量(kg)", dtype="float", sample_values=["12.5"]),
+                ],
+            ),
+            FileSummary(
+                path="距离矩阵.xlsx",
+                rows=2,
+                cols=2,
+                columns=[
+                    ColumnProfile(name="0", dtype="float"),
+                    ColumnProfile(name="1", dtype="float"),
+                ],
+            ),
+        ]
+    )
+    static = StaticLTM(raw_problem="测试", data_profile=profile)
+    prompt = PromptCatalog().render(
+        "coder",
+        PromptContext(static_ltm=static, dynamic_ltm=DynamicLTM()),
+    )
+    import json
+    import re
+
+    # 从渲染结果中提取 data_columns_json 内容
+    match = re.search(r'"file": "订单信息\.xlsx"', prompt)
+    assert match, "列名清单应按文件分组，包含 订单信息.xlsx"
+    assert "距离矩阵.xlsx" in prompt
+    assert "客户编号" in prompt
+    # 扁平合并时的特征不应出现（旧的 [{"name":...}] 顶层结构）
+    assert '"file"' in prompt
 
 
 def test_writer_prompt_handles_empty_result_preview():
@@ -849,7 +911,7 @@ def test_check_ltm_against_facts_handles_duplicate_values():
     assert not any("未在 LTM 中引用" in i for i in issues)
 
 
-def test_clarifier_node_records_constant_issues_in_audit():
+def test_clarifier_node_records_constant_issues_in_audit(monkeypatch):
     """V11 第二层：clarifier_node 应把常量校验告警记录到 audit。"""
     from modeling_assistant.agents.nodes import clarifier_node
     from modeling_assistant.agents.runtime import AgentRuntime
@@ -871,7 +933,7 @@ def test_clarifier_node_records_constant_issues_in_audit():
             commit_summary="test",
         )
 
-    AgentRuntime.invoke_structured = mock_invoke
+    monkeypatch.setattr(AgentRuntime, "invoke_structured", mock_invoke)
 
     state: GraphState = {
         "static_ltm": StaticLTM(
@@ -1288,3 +1350,657 @@ def test_coder_prompt_renders_problem_facts_and_parse_hints():
     assert "m/s" in prompt
     assert "parse_hint" in prompt or "str.replace" in prompt
     assert "V11" in prompt
+
+
+# ── V12：数据不进 prompt，只进提炼信息 ────────────────────────────
+
+def test_prompt_does_not_include_raw_data():
+    """V12 修复：sample_head / 全量相关性矩阵 / 全量样例值不得进入任何 prompt。"""
+    from modeling_assistant.schemas.state import FileSummary
+
+    profile = DataProfile(
+        total_rows=10,
+        total_cols=2,
+        columns=[
+            ColumnProfile(name="a", dtype="float", sample_values=[1.0, 2.0, 3.0, 4.0, 5.0]),
+        ],
+        sample_head=[{"a": "1.0"}, {"a": "2.0"}],
+        correlation_matrix={"a": {"a": 1.0}},
+        file_summaries=[
+            FileSummary(
+                path="data/附件1.csv",
+                rows=10,
+                cols=2,
+                columns=[
+                    ColumnProfile(name="a", dtype="float", sample_values=[1.0, 2.0, 3.0, 4.0, 5.0]),
+                ],
+            )
+        ],
+    )
+    state = StaticLTM(
+        raw_problem="test",
+        data_profile=profile,
+    )
+    coder_prompt = PromptCatalog().render(
+        "coder",
+        PromptContext(static_ltm=state, dynamic_ltm=DynamicLTM(), control=ControlState()),
+    )
+    math_prompt = PromptCatalog().render(
+        "mathematician",
+        PromptContext(static_ltm=state, dynamic_ltm=DynamicLTM(), control=ControlState()),
+    )
+    # 原始数据不得出现
+    assert "sample_head" not in coder_prompt
+    assert "correlation_matrix" not in coder_prompt
+    assert "sample_head" not in math_prompt
+    assert "correlation_matrix" not in math_prompt
+    # 全量样例不得出现（5 个样例只应保留前 3 个）
+    assert "1.0, 2.0, 3.0, 4.0, 5.0" not in coder_prompt
+    # 紧凑摘要应保留文件边界与列结构
+    assert "data/附件1.csv" in coder_prompt
+    assert "数据概要" in coder_prompt
+
+
+def test_data_loader_builds_file_summaries(tmp_path):
+    """V12 修复：多附件各自保留 rows/cols/columns，不再只呈现合并后的大表。"""
+    from modeling_assistant.data.loader import load_data_profile
+
+    f1 = tmp_path / "data1.csv"
+    f2 = tmp_path / "data2.csv"
+    f1.write_text("age,score\n1,2\n3,4\n", encoding="utf-8")
+    f2.write_text("x,y\n0.1\n", encoding="utf-8")
+
+    profile = load_data_profile([str(f1), str(f2)])
+    assert len(profile.file_summaries) == 2
+    assert profile.file_summaries[0].rows == 2
+    assert profile.file_summaries[0].cols == 2
+    assert {c.name for c in profile.file_summaries[0].columns} == {"age", "score"}
+    assert profile.file_summaries[1].rows == 1
+    # 兼容旧字段：合并画像仍保留
+    assert profile.total_rows == 3
+
+
+def test_data_analyst_node_writes_intelligence(tmp_path, monkeypatch):
+    """V12 新增：data_analyst_node 把 LLM 提炼的数据情报写入 static_ltm.data_intelligence。"""
+    from modeling_assistant.agents.nodes import data_analyst_node
+    from modeling_assistant.agents.runtime import AgentRuntime
+    from modeling_assistant.config.settings import AppSettings
+    from modeling_assistant.schemas.responses import DataIntelligenceResponse
+    from modeling_assistant.schemas.state import FileSummary, GraphState
+
+    runtime = AgentRuntime.from_settings(
+        AppSettings(output_dir=tmp_path / "out", api_key_env="MISSING_KEY_FOR_TEST")
+    )
+
+    def mock_invoke(self, name, state, response_cls, system_prompt=None, fallback_parser=None):
+        return DataIntelligenceResponse(
+            insights=["附件1是反射率光谱表，需按文件分组拟合", "订单表与距离矩阵需按站点关联"]
+        )
+
+    monkeypatch.setattr(AgentRuntime, "invoke_structured", mock_invoke)
+    state: GraphState = {
+        "static_ltm": StaticLTM(
+            raw_problem="test",
+            data_profile=DataProfile(
+                file_summaries=[FileSummary(path="a.csv", rows=3, cols=1, columns=[ColumnProfile(name="x", dtype="float")])]
+            ),
+        ),
+        "control": ControlState(),
+    }
+    result = data_analyst_node(state, runtime=runtime)
+    assert len(result["static_ltm"].data_intelligence) == 2
+    assert result["control"].phase == "data_intelligence_extracted"
+
+
+def test_architect_node_stores_result_contract(tmp_path, monkeypatch):
+    """V12 新增：Architect 声明的 result_contract 应随 artifacts 下传。"""
+    from modeling_assistant.agents.nodes import architect_node
+    from modeling_assistant.agents.runtime import AgentRuntime
+    from modeling_assistant.config.settings import AppSettings
+    from modeling_assistant.schemas.responses import ArchitectResponse, ResultColumnSpec, ResultContract
+    from modeling_assistant.schemas.state import ArtifactBundle, GraphState
+
+    runtime = AgentRuntime.from_settings(
+        AppSettings(output_dir=tmp_path / "out", api_key_env="MISSING_KEY_FOR_TEST")
+    )
+
+    def mock_invoke(self, name, state, response_cls, system_prompt=None, fallback_parser=None):
+        return ArchitectResponse(
+            outline={"摘要": "x"},
+            pseudocode=["步骤1"],
+            result_contract=ResultContract(
+                description="最优时点表",
+                allow_single_row=False,
+                columns=[ResultColumnSpec(name="group", dtype="category")],
+            ),
+        )
+
+    monkeypatch.setattr(AgentRuntime, "invoke_structured", mock_invoke)
+    state: GraphState = {
+        "static_ltm": StaticLTM(raw_problem="test"),
+        "dynamic_ltm": DynamicLTM(objective="目标"),
+        "control": ControlState(),
+        "artifacts": ArtifactBundle(),
+        "prompt_audit": {},
+    }
+    result = architect_node(state, runtime=runtime)
+    assert result["artifacts"].result_contract is not None
+    assert result["artifacts"].result_contract.columns[0].name == "group"
+
+
+def test_result_reviewer_node_accepts_single_row_with_contract(tmp_path):
+    """V12 修复：有契约时 result_reviewer_node 应放行合法的单行标量答案。"""
+    import tempfile
+    from pathlib import Path
+
+    from modeling_assistant.schemas.responses import ResultColumnSpec, ResultContract
+    from modeling_assistant.schemas.state import ArtifactBundle, GraphState
+    from modeling_assistant.validation.results import result_reviewer_node
+
+    csv_path = Path(tempfile.mkdtemp()) / "output.csv"
+    csv_path.write_text("answer\n12.5\n", encoding="utf-8")
+    state: GraphState = {
+        "static_ltm": StaticLTM(raw_problem="test"),
+        "dynamic_ltm": DynamicLTM(),
+        "control": ControlState(),
+        "artifacts": ArtifactBundle(
+            result_paths=[str(csv_path)],
+            result_contract=ResultContract(
+                allow_single_row=True,
+                columns=[ResultColumnSpec(name="answer", dtype="float", min=0.0, max=60.0)],
+            ),
+        ),
+        "prompt_audit": {},
+    }
+    result = result_reviewer_node(state)
+    assert result["control"].phase == "result_review_passed"
+    assert not result["control"].last_result_review_issues
+
+
+# ── V13：编程手模式（builtin / codex / human）────────────────────
+
+def test_parse_hitl_decision_supports_revise_and_auto():
+    """V13：_parse_hitl_decision 应识别 revise 与 auto。"""
+    from modeling_assistant.agents.nodes import _parse_hitl_decision
+
+    assert _parse_hitl_decision("revise 换用整数规划")["type"] == "revise"
+    assert _parse_hitl_decision("revise 换用整数规划")["version"] == "换用整数规划"
+    assert _parse_hitl_decision("auto")["type"] == "auto"
+    assert _parse_hitl_decision("approve")["type"] == "approve"
+
+
+def test_route_after_architect_external_skips_review_after_approved():
+    """V13：架构审核通过后，重试直接进任务包分发，不再重复打断审核。"""
+    from modeling_assistant.graph.routing import route_after_architect_external
+
+    state = {"control": ControlState(implementation_architecture_reviewed=False)}
+    assert route_after_architect_external(state) == "hitl_implementation_review"
+    state = {"control": ControlState(implementation_architecture_reviewed=True)}
+    assert route_after_architect_external(state) == "dispatch_implementation"
+
+
+def test_route_after_implementation_review_and_human():
+    """V13：实现审核与人工交付后的路由。"""
+    from modeling_assistant.graph.routing import (
+        route_after_implementation_human,
+        route_after_implementation_review,
+    )
+
+    assert route_after_implementation_review({"control": ControlState()}) == "dispatch_implementation"
+    state = {"control": ControlState(phase="hitl_implementation_revised")}
+    assert route_after_implementation_review(state) == "architect"
+    state = {"control": ControlState(rollback_to_version="v1.0")}
+    assert route_after_implementation_review(state) == "rollback"
+
+    assert route_after_implementation_human({"control": ControlState(phase="implementation_human_ready")}) == "coder"
+    assert route_after_implementation_human({"control": ControlState(phase="implementation_auto")}) == "coder"
+    assert route_after_implementation_human({"control": ControlState(phase="implementation_revised")}) == "architect"
+
+
+def test_coder_node_human_mode_reads_solution(tmp_path):
+    """V13：human 模式下 coder_node 直接执行人工交付的 solution.py。"""
+    from modeling_assistant.agents.nodes import coder_node
+    from modeling_assistant.agents.runtime import AgentRuntime
+    from modeling_assistant.config.settings import AppSettings
+    from modeling_assistant.schemas.state import ArtifactBundle, GraphState
+
+    output_dir = tmp_path / "outputs"
+    task_dir = tmp_path / "tasks"
+    task_dir.mkdir(parents=True)
+    (output_dir / "results").mkdir(parents=True)
+    code = (
+        "import os\nfrom pathlib import Path\nimport pandas as pd\n"
+        "out = os.environ['MODELING_OUTPUT_DIR']\n"
+        "p = Path(out) / 'results' / 'output.csv'\n"
+        "p.parent.mkdir(parents=True, exist_ok=True)\n"
+        "pd.DataFrame({'answer': [12.5]}).to_csv(p, index=False)\n"
+    )
+    (task_dir / "solution.py").write_text(code, encoding="utf-8")
+
+    runtime = AgentRuntime.from_settings(
+        AppSettings(
+            output_dir=output_dir,
+            api_key_env="MISSING_KEY_FOR_TEST",
+            coder_external_mode="human",
+        )
+    )
+    state: GraphState = {
+        "static_ltm": StaticLTM(raw_problem="test"),
+        "dynamic_ltm": DynamicLTM(),
+        "control": ControlState(),
+        "artifacts": ArtifactBundle(coder_task_dir=str(task_dir)),
+        "prompt_audit": {},
+    }
+    result = coder_node(state, runtime=runtime)
+    assert result["control"].phase == "code_executed_successfully"
+    assert result["artifacts"].result_paths
+    assert "output.csv" in result["artifacts"].result_paths[0]
+
+
+def test_coder_node_human_mode_missing_solution(tmp_path):
+    """V13：human 模式未交付 solution.py 时应走 code_generation_empty 失败路径。"""
+    from modeling_assistant.agents.nodes import coder_node
+    from modeling_assistant.agents.runtime import AgentRuntime
+    from modeling_assistant.config.settings import AppSettings
+    from modeling_assistant.schemas.state import ArtifactBundle, GraphState
+
+    output_dir = tmp_path / "outputs"
+    task_dir = tmp_path / "tasks"
+    task_dir.mkdir(parents=True)
+    runtime = AgentRuntime.from_settings(
+        AppSettings(
+            output_dir=output_dir,
+            api_key_env="MISSING_KEY_FOR_TEST",
+            coder_external_mode="human",
+        )
+    )
+    state: GraphState = {
+        "static_ltm": StaticLTM(raw_problem="test"),
+        "dynamic_ltm": DynamicLTM(),
+        "control": ControlState(),
+        "artifacts": ArtifactBundle(coder_task_dir=str(task_dir)),
+        "prompt_audit": {},
+    }
+    result = coder_node(state, runtime=runtime)
+    assert result["control"].phase == "code_generation_empty"
+    assert any("solution.py" in log for log in result["control"].coder_error_log)
+
+
+def test_coder_node_human_mode_runs_figures(tmp_path):
+    """V13：human 模式交付 figures.py 后，图片应被收集进 figure_paths。"""
+    from modeling_assistant.agents.nodes import coder_node
+    from modeling_assistant.agents.runtime import AgentRuntime
+    from modeling_assistant.config.settings import AppSettings
+    from modeling_assistant.schemas.state import ArtifactBundle, GraphState
+
+    output_dir = tmp_path / "outputs"
+    task_dir = tmp_path / "tasks"
+    task_dir.mkdir(parents=True)
+    (output_dir / "results").mkdir(parents=True)
+    (task_dir / "solution.py").write_text(
+        "import os\nfrom pathlib import Path\nimport pandas as pd\n"
+        "out = os.environ['MODELING_OUTPUT_DIR']\n"
+        "p = Path(out) / 'results' / 'output.csv'\n"
+        "p.parent.mkdir(parents=True, exist_ok=True)\n"
+        "pd.DataFrame({'x': [1, 2]}).to_csv(p, index=False)\n",
+        encoding="utf-8",
+    )
+    (task_dir / "figures.py").write_text(
+        "import os, matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\n"
+        "out = os.environ['MODELING_OUTPUT_DIR']\n"
+        "d = os.path.join(out, 'figures')\n"
+        "os.makedirs(d, exist_ok=True)\n"
+        "plt.plot([1, 2, 3], [1, 4, 9])\n"
+        "plt.savefig(os.path.join(d, 'figure1.png'))\n",
+        encoding="utf-8",
+    )
+
+    runtime = AgentRuntime.from_settings(
+        AppSettings(
+            output_dir=output_dir,
+            api_key_env="MISSING_KEY_FOR_TEST",
+            coder_external_mode="human",
+        )
+    )
+    state: GraphState = {
+        "static_ltm": StaticLTM(raw_problem="test"),
+        "dynamic_ltm": DynamicLTM(),
+        "control": ControlState(),
+        "artifacts": ArtifactBundle(coder_task_dir=str(task_dir)),
+        "prompt_audit": {},
+    }
+    result = coder_node(state, runtime=runtime)
+    assert result["control"].phase == "code_executed_successfully"
+    assert any("figure1.png" in p for p in result["artifacts"].figure_paths)
+
+
+def test_human_mode_graph_end_to_end(tmp_path, monkeypatch):
+    """V13：human 模式整图链路——架构审核 → 人工写码 → 执行验证 → 成稿。"""
+    from langgraph.types import Command
+
+    from modeling_assistant.agents.runtime import AgentRuntime
+    from modeling_assistant.config.settings import AppSettings
+    from modeling_assistant.graph.builder import build_graph
+    from modeling_assistant.schemas.responses import (
+        AnalystResponse,
+        ArchitectResponse,
+        ClarifierResponse,
+        CoderResponse,
+        DataIntelligenceResponse,
+        MathematicianResponse,
+        MilestoneReviewer1Response,
+        PlanEvaluation,
+        RealistResponse,
+        ReflectionResponse,
+        ResultContract,
+        WriterResponse,
+    )
+    from modeling_assistant.schemas.state import ArtifactBundle
+
+    output_dir = tmp_path / "outputs"
+    solution = (
+        "import os\nfrom pathlib import Path\nimport pandas as pd\n"
+        "out = os.environ['MODELING_OUTPUT_DIR']\n"
+        "p = Path(out) / 'results' / 'output.csv'\n"
+        "q1 = Path(out) / 'results' / 'q1.csv'\n"
+        "p.parent.mkdir(parents=True, exist_ok=True)\n"
+        "pd.DataFrame({'answer': [12.5]}).to_csv(p, index=False)\n"
+        "pd.DataFrame({'answer': [12.5]}).to_csv(q1, index=False)\n"
+    )
+
+    def mock_invoke_structured(self, name, state, response_cls, system_prompt=None, fallback_parser=None):
+        if name == "analyst":
+            return AnalystResponse(problem_understanding="x", data_schema={})
+        if name == "mathematician":
+            return MathematicianResponse(plans=[{"id": "p1", "title": "t", "description": "d", "innovation_score": 80, "feasibility_score": 80}])
+        if name == "realist":
+            return RealistResponse(plan_evaluations=[PlanEvaluation(plan_id="p1", innovation_score=80, feasibility_score=80, verdict="keep")])
+        if name == "clarifier":
+            return ClarifierResponse(assumptions=["a"], nomenclature={"x": "x"}, equations=["y=x"], objective="o", solution_outline="s", commit_summary="v")
+        if name == "milestone_reviewer_1":
+            return MilestoneReviewer1Response(approval=True, issues=[], feedback="ok")
+        if name == "architect":
+            return ArchitectResponse(
+                outline={"摘要": "a", "问题重述": "b", "模型建立": "c", "模型求解": "d", "结果分析": "e"},
+                pseudocode=["s1"],
+                algorithms_summary="alg",
+                result_contract=ResultContract(allow_single_row=True),
+            )
+        if name == "coder":
+            return CoderResponse(code=solution, result_path="results/output.csv")
+        if name == "reflection":
+            return ReflectionResponse(findings=[], run_summary="ok")
+        if name == "data_analyst":
+            return DataIntelligenceResponse(insights=["i"])
+        if name == "writer":
+            return WriterResponse(latex_content="\\documentclass{article}\n")
+        raise AssertionError(f"unexpected prompt: {name}")
+
+    monkeypatch.setattr(AgentRuntime, "invoke_structured", mock_invoke_structured)
+    monkeypatch.setattr(
+        AgentRuntime, "invoke", lambda self, name, state, system_prompt=None: "kw"
+    )
+
+    settings = AppSettings(
+        output_dir=output_dir,
+        api_key_env="MISSING_KEY_FOR_TEST",
+        coder_external_mode="human",
+        search_enabled=False,
+    )
+    app = build_graph(runtime=AgentRuntime.from_settings(settings))
+    config = {"configurable": {"thread_id": "human-e2e"}}
+    state = {
+        "static_ltm": StaticLTM(raw_problem="x"),
+        "dynamic_ltm": DynamicLTM(),
+        "ltm_archive": [],
+        "control": ControlState(),
+        "artifacts": ArtifactBundle(),
+        "prompt_audit": {},
+    }
+    cur = state
+    seen_human = False
+    final = None
+    for _ in range(30):
+        result = app.invoke(cur, config)
+        interrupts = result.get("__interrupt__")
+        if not interrupts:
+            final = result
+            break
+        interrupt_value = interrupts[0].value if hasattr(interrupts[0], "value") else interrupts[0]
+        stage = interrupt_value.get("stage") if isinstance(interrupt_value, dict) else str(interrupt_value)
+        if stage == "implementation_human":
+            task_dir = Path(interrupt_value.get("task_dir"))
+            task_dir.mkdir(parents=True, exist_ok=True)
+            (task_dir / "solution.py").write_text(solution, encoding="utf-8")
+            seen_human = True
+        cur = Command(resume="approve")
+    assert seen_human, "应经过人工编程手交付暂停点"
+    assert final is not None and final["control"].phase == "completed"
+    assert final["artifacts"].result_paths
+
+
+# ── V14：小题循环（拆分 / 验收 / 跨小题 / 两题全链路）──────────────
+
+def test_split_sub_questions_recognizes_common_markers():
+    from modeling_assistant.agents.nodes import split_sub_questions
+
+    text = "前言。问题1 求A。问题2 求B。问题3 求C。"
+    parts = split_sub_questions(text)
+    assert len(parts) == 3
+    assert "问题1" in parts[0]
+    assert "问题2" in parts[1]
+    assert "问题3" in parts[2]
+
+    text2 = "（1）求A（2）求B"
+    parts2 = split_sub_questions(text2)
+    assert len(parts2) == 2
+
+
+def test_split_sub_questions_no_markers_returns_whole():
+    from modeling_assistant.agents.nodes import split_sub_questions
+
+    text = "只有一个题目，没有小题分隔。"
+    assert split_sub_questions(text) == [text]
+
+
+def test_parse_hitl_decision_sub_question_commands():
+    from modeling_assistant.agents.nodes import _parse_hitl_decision
+
+    assert _parse_hitl_decision("pass")["type"] == "pass"
+    d = _parse_hitl_decision("fail code 数值不对")
+    assert d["type"] == "fail" and d["level"] == "code"
+    assert "数值不对" in d["version"]
+    assert _parse_hitl_decision("fail architecture 伪代码有误")["level"] == "architecture"
+    assert _parse_hitl_decision("fail model 假设错误")["level"] == "model"
+    d = _parse_hitl_decision("cross 1 Q1 的假设有问题")
+    assert d["type"] == "cross" and d["target"] == 0
+    assert "q1" in d["version"]
+    assert _parse_hitl_decision("edit 问题1：a；问题2：b")["type"] == "edit"
+
+
+def test_route_after_acceptance():
+    from modeling_assistant.graph.routing import route_after_acceptance
+
+    # pass → 还有下一题 → mathematician
+    state = {
+        "control": ControlState(
+            phase="sub_question_passed",
+            sub_questions=["q1", "q2"],
+            current_sub_question_index=1,
+        )
+    }
+    assert route_after_acceptance(state) == "mathematician"
+    # pass → 最后一题 → collect_artifacts
+    state["control"] = ControlState(
+        phase="sub_question_passed",
+        sub_questions=["q1", "q2"],
+        current_sub_question_index=2,
+    )
+    assert route_after_acceptance(state) == "collect_artifacts"
+    # fail code → 回到人工交付
+    state["control"] = ControlState(
+        phase="sub_question_fail_code", sub_question_attempts=1, sub_question_budget=4
+    )
+    assert route_after_acceptance(state) == "hitl_implementation_human"
+    # fail architecture → architect
+    state["control"] = ControlState(
+        phase="sub_question_fail_architecture", sub_question_attempts=1, sub_question_budget=4
+    )
+    assert route_after_acceptance(state) == "architect"
+    # fail model → mathematician
+    state["control"] = ControlState(
+        phase="sub_question_fail_model", sub_question_attempts=1, sub_question_budget=4
+    )
+    assert route_after_acceptance(state) == "mathematician"
+    # 预算耗尽 → hitl_modeling
+    state["control"] = ControlState(
+        phase="sub_question_fail_model", sub_question_attempts=4, sub_question_budget=4
+    )
+    assert route_after_acceptance(state) == "hitl_modeling"
+    # cross → 跨小题 HITL
+    state["control"] = ControlState(phase="cross_sub_question_requested")
+    assert route_after_acceptance(state) == "cross_sub_question_hitl"
+
+
+def test_write_coder_task_package_uses_sub_question_dir(tmp_path):
+    import json
+
+    from modeling_assistant.handoff.spec import write_coder_task_package
+    from modeling_assistant.schemas.state import ArtifactBundle
+
+    control = ControlState(
+        sub_questions=["问题1", "问题2"],
+        current_sub_question_index=0,
+    )
+    state = {
+        "static_ltm": StaticLTM(raw_problem="x"),
+        "dynamic_ltm": DynamicLTM(),
+        "control": control,
+        "artifacts": ArtifactBundle(),
+    }
+    md_path, json_path = write_coder_task_package(state, tmp_path)
+    assert md_path.parent.name == "q1"
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    assert payload["sub_question"]["index"] == 0
+    assert payload["constraints"]["output_path"].endswith("q1.csv")
+
+
+def test_two_sub_questions_human_mode_end_to_end(tmp_path, monkeypatch):
+    """V14：两小题 human 模式全链路——拆分 → q1 建模/实现/验收 → q2（上下文含 q1）→ Writer。"""
+    from langgraph.types import Command
+
+    from modeling_assistant.agents.runtime import AgentRuntime
+    from modeling_assistant.config.settings import AppSettings
+    from modeling_assistant.graph.builder import build_graph
+    from modeling_assistant.schemas.responses import (
+        AnalystResponse,
+        ArchitectResponse,
+        ClarifierResponse,
+        CoderResponse,
+        DataIntelligenceResponse,
+        MathematicianResponse,
+        MilestoneReviewer1Response,
+        PlanEvaluation,
+        RealistResponse,
+        ReflectionResponse,
+        ResultContract,
+        WriterResponse,
+    )
+    from modeling_assistant.schemas.state import ArtifactBundle
+
+    output_dir = tmp_path / "outputs"
+    solution = (
+        "import os\nfrom pathlib import Path\nimport pandas as pd\n"
+        "out = os.environ['MODELING_OUTPUT_DIR']\n"
+        "p = Path(out) / 'results' / 'output.csv'\n"
+        "q1 = Path(out) / 'results' / 'q1.csv'\n"
+        "q2 = Path(out) / 'results' / 'q2.csv'\n"
+        "p.parent.mkdir(parents=True, exist_ok=True)\n"
+        "pd.DataFrame({'answer': [12.5]}).to_csv(p, index=False)\n"
+        "pd.DataFrame({'answer': [12.5]}).to_csv(q1, index=False)\n"
+        "pd.DataFrame({'answer': [12.5]}).to_csv(q2, index=False)\n"
+    )
+
+    def mock_invoke_structured(self, name, state, response_cls, system_prompt=None, fallback_parser=None):
+        if name == "analyst":
+            return AnalystResponse(problem_understanding="x", data_schema={})
+        if name == "mathematician":
+            return MathematicianResponse(plans=[{"id": "p1", "title": "t", "description": "d", "innovation_score": 80, "feasibility_score": 80}])
+        if name == "realist":
+            return RealistResponse(plan_evaluations=[PlanEvaluation(plan_id="p1", innovation_score=80, feasibility_score=80, verdict="keep")])
+        if name == "clarifier":
+            return ClarifierResponse(assumptions=["a"], nomenclature={"x": "x"}, equations=["y=x"], objective="o", solution_outline="s", commit_summary="v")
+        if name == "milestone_reviewer_1":
+            return MilestoneReviewer1Response(approval=True, issues=[], feedback="ok")
+        if name == "architect":
+            return ArchitectResponse(
+                outline={"摘要": "a", "问题重述": "b", "模型建立": "c", "模型求解": "d", "结果分析": "e"},
+                pseudocode=["s1"],
+                algorithms_summary="alg",
+                result_contract=ResultContract(allow_single_row=True),
+            )
+        if name == "coder":
+            return CoderResponse(code=solution, result_path="results/output.csv")
+        if name == "reflection":
+            return ReflectionResponse(findings=[], run_summary="ok")
+        if name == "data_analyst":
+            return DataIntelligenceResponse(insights=["i"])
+        if name == "writer":
+            return WriterResponse(latex_content="\\documentclass{article}\n")
+        raise AssertionError(f"unexpected prompt: {name}")
+
+    monkeypatch.setattr(AgentRuntime, "invoke_structured", mock_invoke_structured)
+    monkeypatch.setattr(
+        AgentRuntime, "invoke", lambda self, name, state, system_prompt=None: "kw"
+    )
+
+    settings = AppSettings(
+        output_dir=output_dir,
+        api_key_env="MISSING_KEY_FOR_TEST",
+        coder_external_mode="human",
+        search_enabled=False,
+    )
+    app = build_graph(runtime=AgentRuntime.from_settings(settings))
+    config = {"configurable": {"thread_id": "two-sub-q-human"}}
+    state = {
+        "static_ltm": StaticLTM(raw_problem="问题1 求A。问题2 求B。"),
+        "dynamic_ltm": DynamicLTM(),
+        "ltm_archive": [],
+        "control": ControlState(),
+        "artifacts": ArtifactBundle(),
+        "prompt_audit": {},
+    }
+    cur = state
+    human_writes = 0
+    final = None
+    for _ in range(60):
+        result = app.invoke(cur, config)
+        interrupts = result.get("__interrupt__")
+        if not interrupts:
+            final = result
+            break
+        interrupt_value = interrupts[0].value if hasattr(interrupts[0], "value") else interrupts[0]
+        stage = interrupt_value.get("stage") if isinstance(interrupt_value, dict) else str(interrupt_value)
+        if stage == "sub_question_split":
+            cur = Command(resume="approve")
+        elif stage == "implementation_human":
+            task_dir = Path(interrupt_value.get("task_dir"))
+            task_dir.mkdir(parents=True, exist_ok=True)
+            (task_dir / "solution.py").write_text(solution, encoding="utf-8")
+            human_writes += 1
+            cur = Command(resume="approve")
+        elif stage == "sub_question_acceptance":
+            cur = Command(resume="pass")
+        elif stage == "cross_sub_question":
+            cur = Command(resume="accept")
+        else:
+            cur = Command(resume="approve")
+
+    assert human_writes == 2, f"应经历两次人工交付，实际 {human_writes}"
+    assert final is not None and final["control"].phase == "completed"
+    ctrl = final["control"]
+    assert len(ctrl.sub_results) == 2
+    assert len(final["ltm_archive"]) >= 2
+    paths = final["artifacts"].result_paths
+    assert any("q1.csv" in p for p in paths)
+    assert any("q2.csv" in p for p in paths)

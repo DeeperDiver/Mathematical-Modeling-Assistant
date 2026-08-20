@@ -99,3 +99,94 @@ def test_validate_search_results_checks_relevance():
     validated = validate_search_results(results, keywords=["优化", "机器学习"], min_relevance_keywords=2)
     assert len(validated) == 1
     assert validated[0].title == "相关论文"
+
+
+# ── V12：ResultReviewer 契约化校验 ────────────────────────────────
+
+def _write_csv(tmp_path, content: str):
+    import tempfile
+    from pathlib import Path
+
+    d = tempfile.mkdtemp()
+    p = Path(d) / "output.csv"
+    p.write_text(content, encoding="utf-8")
+    return str(p)
+
+
+def test_validate_result_accepts_single_row_when_contract_allows():
+    """V12 修复：契约声明 allow_single_row=true 时，单行标量答案应通过。"""
+    from modeling_assistant.schemas.responses import ResultColumnSpec, ResultContract
+    from modeling_assistant.validation.results import validate_result
+
+    path = _write_csv(None, "answer\n12.5\n")
+    contract = ResultContract(
+        description="有效遮蔽时长（秒）",
+        allow_single_row=True,
+        columns=[ResultColumnSpec(name="answer", dtype="float", min=0.0, max=60.0)],
+    )
+    report = validate_result(path, contract=contract)
+    assert report["passed"], f"单行标量答案应通过契约校验：{report['issues']}"
+    assert not report["issues"]
+
+
+def test_validate_result_rejects_constant_column_when_contract_requires_distinct():
+    """契约要求区分度的列是常量 → 必须拒绝。"""
+    from modeling_assistant.schemas.responses import ResultColumnSpec, ResultContract
+    from modeling_assistant.validation.results import validate_result
+
+    path = _write_csv(None, "group,optimal_week\nA,10.0\nB,10.0\nC,10.0\n")
+    contract = ResultContract(
+        columns=[
+            ResultColumnSpec(name="group", dtype="category"),
+            ResultColumnSpec(
+                name="optimal_week", dtype="float",
+                min=0.0, max=40.0, distinct_required=True,
+            ),
+        ]
+    )
+    report = validate_result(path, contract=contract)
+    assert not report["passed"]
+    assert any("区分度" in issue for issue in report["issues"])
+
+
+def test_validate_result_allows_constant_column_not_required_distinct():
+    """契约未要求区分度的共享常量列 → 只告警，不拒绝。"""
+    from modeling_assistant.schemas.responses import ResultColumnSpec, ResultContract
+    from modeling_assistant.validation.results import validate_result
+
+    path = _write_csv(None, "id,threshold,value\n1,20,1.1\n2,20,2.2\n3,20,3.3\n")
+    contract = ResultContract(
+        columns=[
+            ResultColumnSpec(name="id", dtype="int", distinct_required=True),
+            ResultColumnSpec(name="threshold", dtype="float"),
+            ResultColumnSpec(name="value", dtype="float", distinct_required=True),
+        ]
+    )
+    report = validate_result(path, contract=contract)
+    assert report["passed"], f"共享常量列不应拒绝：{report['issues']}"
+    assert any("常量" in w for w in report["warnings"])
+
+
+def test_validate_result_rejects_out_of_range_when_contract_declares():
+    """契约声明列范围后，越界值必须拒绝。"""
+    from modeling_assistant.schemas.responses import ResultColumnSpec, ResultContract
+    from modeling_assistant.validation.results import validate_result
+
+    path = _write_csv(None, "value\n12.5\n")
+    contract = ResultContract(
+        allow_single_row=True,
+        columns=[ResultColumnSpec(name="value", dtype="float", min=0.0, max=10.0)],
+    )
+    report = validate_result(path, contract=contract)
+    assert not report["passed"]
+    assert any("上限" in issue for issue in report["issues"])
+
+
+def test_validate_result_legacy_behavior_without_contract():
+    """无契约时保留旧的通用启发式（单行/常量列仍拒绝），保证向后兼容。"""
+    from modeling_assistant.validation.results import validate_result
+
+    path = _write_csv(None, "answer\n12.5\n")
+    report = validate_result(path)
+    assert not report["passed"]
+    assert any("只有一行" in issue for issue in report["issues"])

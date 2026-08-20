@@ -55,9 +55,102 @@ class MilestoneReviewer1Response(BaseModel):
     feedback: str = ""
 
 
+class ResultColumnSpec(BaseModel):
+    """结果契约中的单列规格。"""
+
+    name: str
+    dtype: Literal["int", "float", "category", "text", "datetime"] = "float"
+    min: float | None = None
+    max: float | None = None
+    # 为 True 时，该列在不同样本/分组间必须存在区分度（nunique > 1）
+    distinct_required: bool = False
+    description: str = ""
+
+
+class ResultContract(BaseModel):
+    """Architect 声明的输出结果契约。
+
+    仅声明"答案应该长什么样"，不含具体数值：
+    - allow_single_row=True 表示标量答案（如"有效遮蔽时长"）合法，不应被单行误杀
+    - min_rows/max_rows 限定期望行数
+    - columns 声明必需列、类型、合理范围与是否要求区分度
+    """
+
+    description: str = ""
+    allow_single_row: bool = False
+    min_rows: int | None = None
+    max_rows: int | None = None
+    columns: list[ResultColumnSpec] = Field(default_factory=list)
+    allow_extra_columns: bool = True
+
+
+class FigurePlan(BaseModel):
+    """Architect 声明的预期图表：类型、用途、数据来源。
+
+    V15 新增 kind 字段，区分数据图与论文必需的非数据图：
+    - data：数据驱动图（散点/折线/热力图/箱线图等），由 Drawer 基于真实结果绘制
+    - flowchart：技术路线图/求解流程图（非数据图），竞赛论文通常至少需要一张
+    - diagram：模型结构/变量关系/指标体系图（非数据图）
+
+    V17 升级：架构阶段必须把每张图规划到「可直接成稿」的完整度——
+    图注（caption）、目标章节（section）、内容规格（content_spec）与
+    是否论文必需（required），配合 figure_manifest 形成
+    「规划 → 生成 → 引用 → 校验」闭环。
+    """
+
+    id: str = ""
+    figure_type: str = ""
+    kind: Literal["data", "flowchart", "diagram"] = "data"
+    purpose: str = ""
+    data_source: str = ""
+    # V17 新增：图注（LaTeX \caption 文本，可直接进论文）
+    caption: str = ""
+    # V17 新增：目标章节文件（如 5_problem1.tex / 2_analysis.tex）
+    section: str = ""
+    # V17 新增：内容规格（数据来源列、变量、期望形状/统计量，供 Drawer 精确实现）
+    content_spec: str = ""
+    # V17 新增：论文必需图；缺失/未引用时校验打回
+    required: bool = True
+
+
+class TablePlan(BaseModel):
+    """Architect 声明的预期结果表/附表。"""
+
+    id: str = ""
+    title: str = ""
+    columns: list[str] = Field(default_factory=list)
+    purpose: str = ""
+    # V17 新增：目标章节文件、内容规格、是否论文必需
+    section: str = ""
+    content_spec: str = ""
+    required: bool = True
+
+
 class ArchitectResponse(BaseModel):
     outline: dict[str, str] = Field(default_factory=dict)
     pseudocode: list[str] = Field(default_factory=list)
+    # V12 修复：机器可读的结果契约，让 Coder 按契约产出、
+    # ResultReviewer 按契约验证，替代通用启发式误杀。
+    result_contract: ResultContract = Field(default_factory=ResultContract)
+    # V13 新增：实现架构摘要与图表/表格计划。
+    # 这些字段用于生成"方案与实现架构说明书"，经人类审核后
+    # 打包给编程手（外部 AI）实现。
+    algorithms_summary: str = ""
+    figures_plan: list[FigurePlan] = Field(default_factory=list)
+    tables_plan: list[TablePlan] = Field(default_factory=list)
+
+
+class DataIntelligenceResponse(BaseModel):
+    """数据理解分析师的结构化输出。
+
+    只提炼"解题思路需要知道的信息"，不复述原始数据：
+    - 每个文件/表是什么（实体/样本/关系）
+    - 行列语义、关键列、分组结构
+    - 哪些文件/列与题目相关，哪些可能无关
+    - 数据层面的风险（缺失、异构、需要按文件分组等）
+    """
+
+    insights: list[str] = Field(default_factory=list)
 
 
 class CoderResponse(BaseModel):
@@ -68,6 +161,9 @@ class CoderResponse(BaseModel):
 class DrawerResponse(BaseModel):
     figure_code: str = ""
     figure_paths: list[str] = Field(default_factory=list)
+    # V17 新增：本代码块产出的图对应的 figures_plan.id 列表
+    # （与 figure_paths 一一对应；缺省时按文件名与 plan_id 匹配降级）
+    figure_ids: list[str] = Field(default_factory=list)
     observation: str = ""  # Drawer 对所绘图像的文字观察（视觉洞察回流）
     # 让 Drawer 自评观察的强度，避免硬编码 0.5 导致「散点明显非线性」这类强信号
     # 永远只能进 open_questions 而无法触发 Clarifier 修正。
@@ -89,6 +185,20 @@ class ArbiterResponse(BaseModel):
 
 class WriterResponse(BaseModel):
     latex_content: str = ""
+    # V15：按模板章节输出的分文件内容 {文件名: latex 源码}。
+    # 模板模式（paper_template_dir 存在）下优先使用 sections 写各章节文件，
+    # main.tex 保留模板格式骨架；sections 为空时回退到旧行为（latex_content 写 main.tex）。
+    sections: dict[str, str] = Field(default_factory=dict)
+
+
+class FinalReviewerResponse(BaseModel):
+    """终审 LLM 灵活审查结果（final_reviewer 节点，在确定性检查之后）。"""
+
+    verdict: Literal["pass", "fail"] = "pass"
+    issues: list[str] = Field(default_factory=list)
+    suggestions: list[str] = Field(default_factory=list)
+    numerical_consistency: str = ""  # 数值一致性结论（与结果文件预览比对）
+    summary: str = ""  # 一句话总评
 
 
 class ReflectionFinding(BaseModel):

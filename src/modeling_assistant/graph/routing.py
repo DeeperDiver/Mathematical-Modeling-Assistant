@@ -114,7 +114,7 @@ def route_after_coder(
 
 def route_after_result_reviewer(
     state: GraphState,
-) -> Literal["reflection", "architect", "clarifier"]:
+) -> Literal["reflection", "sub_question_acceptance"]:
     """ResultReviewer 之后的路由。
 
     V9 修复：验证失败也统一走 reflection 节点消费 budget。
@@ -125,6 +125,11 @@ def route_after_result_reviewer(
     - 验证失败 → 进入 reflection 节点消费 budget，由 route_after_reflection 决定回退。
     - 验证通过 → 进入 reflection 节点提取实证发现。
     """
+    # V14 小题循环：机械校验通过后进入人工验收闸门；
+    # 失败仍走 reflection 消费预算并带回反馈。
+    control = state["control"]
+    if control.phase == "result_review_passed":
+        return "sub_question_acceptance"
     return "reflection"
 
 
@@ -204,6 +209,11 @@ def route_after_hitl_modeling(
     """
     control = state["control"]
     phase = control.phase
+    if phase == "sub_question_passed":
+        # 小题循环：HITL 接受当前小题后推进
+        if control.current_sub_question_index < len(control.sub_questions or []):
+            return "mathematician"
+        return "collect_artifacts"
     if phase == "hitl_modeling_retry":
         logger.info("HITL modeling: 人类选择 retry，回 Architect 重试")
         return "architect"
@@ -231,11 +241,17 @@ def route_after_milestone_reviewer_1(
     return "hitl_architecture"
 
 
-def route_after_final_review(state: GraphState) -> Literal["rollback", "hitl_final"]:
-    """终审后：如果 hitl_final 设置了 rollback_to_version，先 rollback checkout，再回建模阶段。"""
+def route_after_final_review(state: GraphState) -> Literal["rollback", "hitl_final", "writer"]:
+    """终审后路由：
+    - rollback_to_version（retry）→ 先 rollback checkout，再回建模阶段
+    - paper_rewrite_requested（rewrite）→ 回 Writer 按反馈重写论文
+    - 其他（approve / 预算耗尽的 rewrite）→ 完成
+    """
     control = state["control"]
     if control.rollback_to_version:
         return "rollback"
+    if control.phase == "paper_rewrite_requested":
+        return "writer"
     return "hitl_final"
 
 
@@ -246,6 +262,105 @@ def route_after_rollback(state: GraphState) -> Literal["architect", "mathematici
     - final_hitl → 回滚到 mathematician（阶段二，重新建模）
     """
     control = state["control"]
-    if control.rollback_source == "final_hitl":
+    if control.rollback_source in ("final_hitl", "cross_sub_question"):
         return "mathematician"
     return "architect"
+
+
+# ── V14 小题循环路由 ─────────────────────────────────────────────
+
+def route_after_split(state: GraphState) -> Literal["analyst", "split_sub_questions"]:
+    """小题确认后进入全局分析；edit 后回到拆分节点重新确认。"""
+    control = state["control"]
+    if control.sub_questions_confirmed:
+        return "analyst"
+    return "split_sub_questions"
+
+
+def route_after_acceptance(
+    state: GraphState,
+) -> Literal[
+    "mathematician",
+    "architect",
+    "hitl_implementation_human",
+    "cross_sub_question_hitl",
+    "hitl_modeling",
+    "collect_artifacts",
+]:
+    """小题验收之后的路由。"""
+    control = state["control"]
+    phase = control.phase
+    if phase == "sub_question_fail_code":
+        if control.sub_question_attempts >= control.sub_question_budget:
+            return "hitl_modeling"
+        return "hitl_implementation_human"
+    if phase == "sub_question_fail_architecture":
+        if control.sub_question_attempts >= control.sub_question_budget:
+            return "hitl_modeling"
+        return "architect"
+    if phase == "sub_question_fail_model":
+        if control.sub_question_attempts >= control.sub_question_budget:
+            return "hitl_modeling"
+        return "mathematician"
+    if phase == "cross_sub_question_requested":
+        return "cross_sub_question_hitl"
+    if phase == "sub_question_passed":
+        if control.current_sub_question_index < len(control.sub_questions or []):
+            return "mathematician"
+        return "collect_artifacts"
+    # 兜底：继续建模当前小题
+    return "mathematician"
+
+
+def route_after_cross_sub_question(
+    state: GraphState,
+) -> Literal["mathematician", "collect_artifacts"]:
+    """跨小题 HITL 之后的路由：accept/rollback 重做当前小题，continue 推进。"""
+    control = state["control"]
+    if control.phase == "sub_question_passed":
+        if control.current_sub_question_index < len(control.sub_questions or []):
+            return "mathematician"
+        return "collect_artifacts"
+    return "mathematician"
+
+
+# ── V13 编程手模式路由（builtin / codex / human）──────────────────
+
+def route_after_architect_external(
+    state: GraphState,
+) -> Literal["hitl_implementation_review", "dispatch_implementation"]:
+    """外部编程手模式下 Architect 之后的路由。
+
+    首次进入先做实现架构人工审核；审核通过后（含后续失败重试）
+    直接进入任务包分发，不再重复打断。
+    """
+    control = state["control"]
+    if control.implementation_architecture_reviewed:
+        return "dispatch_implementation"
+    return "hitl_implementation_review"
+
+
+def route_after_implementation_review(
+    state: GraphState,
+) -> Literal["dispatch_implementation", "architect", "rollback"]:
+    """实现架构人工审核之后的路由。"""
+    control = state["control"]
+    if control.rollback_to_version:
+        return "rollback"
+    if control.phase == "hitl_implementation_revised":
+        return "architect"
+    return "dispatch_implementation"
+
+
+def route_after_implementation_human(
+    state: GraphState,
+) -> Literal["coder", "architect"]:
+    """等待人工编程手交付之后的路由。
+
+    - approve/auto → coder（human 模式读取 solution.py；auto 走内置 LLM）
+    - revise → architect（按反馈修改方案）
+    """
+    control = state["control"]
+    if control.phase == "implementation_revised":
+        return "architect"
+    return "coder"

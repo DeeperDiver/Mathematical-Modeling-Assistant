@@ -10,6 +10,15 @@
 - 从 keep 的方案中选综合评分最高者作为 selected_plan_id。
 - 若所有方案都被 kill/reject，selected_plan_id 留空字符串。
 
+【题型防错速查】（method_knowledge_active={method_knowledge_active}；开启时提供）
+当前题型判定：{problem_type}
+评估方案可行性时，必须对照当前题型的防错要求逐条检查方案是否踩了常见雷区
+（如优化类漏非负/整数/容量约束、多目标未统一量纲、预测类存在数据泄露、
+评价类权重来源不明、机理类缺初始/边界条件等）。发现雷区应通过 feedback 指出，
+并据此调整可行性/创新性评分。
+
+{type_knowledge}
+
 控制状态（含阈值与权重）：
 {control_json}
 

@@ -1,0 +1,42 @@
+{
+  "problem_type": "evaluation",
+  "contest": "国赛",
+  "common_structure": [
+    "摘要",
+    "问题重述",
+    "模型假设",
+    "模型",
+    "模型评价",
+    "问题分析",
+    "模型建立",
+    "符号说明",
+    "建模与求解"
+  ],
+  "structure_variants": [],
+  "recommended_figures": [
+    "饼图",
+    "bar",
+    "line",
+    "scatter",
+    "flow_chart",
+    "scatter_plot",
+    "流程图"
+  ],
+  "writing_baseline": {
+    "tense": "一般现在时"
+  },
+  "common_pitfalls": [],
+  "exemplar_ids": [
+    "2018_C_2018_C_国赛优秀论文",
+    "2020_C_2020C：国赛优秀论文（编号C109）",
+    "2020_C_2020C：针对中小微企业最优信贷决策研究",
+    "2020_C_2020C：银行基于大数据挖掘对中小微企业的信贷决策问题",
+    "2020_C_2020C：银行对中小微企业的信贷决策分析",
+    "2021_B_B106",
+    "2021_C_C283",
+    "2025_C_C023"
+  ],
+  "quality_score": 0.5,
+  "version": "1.0",
+  "updated_at": "2026-08-18T17:07:58.893192Z"
+}

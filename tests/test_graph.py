@@ -7,6 +7,21 @@ from langgraph.types import Command
 from modeling_assistant.agents.runtime import AgentRuntime
 from modeling_assistant.config.settings import AppSettings, load_settings
 from modeling_assistant.graph.builder import build_graph
+from modeling_assistant.schemas.responses import (
+    AnalystResponse,
+    ArchitectResponse,
+    ClarifierResponse,
+    CoderResponse,
+    DataIntelligenceResponse,
+    DrawerResponse,
+    MathematicianResponse,
+    MilestoneReviewer1Response,
+    PlanEvaluation,
+    RealistResponse,
+    ReflectionResponse,
+    ResultContract,
+    WriterResponse,
+)
 from modeling_assistant.schemas.state import (
     ArtifactBundle,
     ControlState,
@@ -20,20 +35,112 @@ def _run_to_completion(app, state: dict, config: dict) -> dict:
     """运行图直到完成，自动批准所有 HITL 中断。"""
     current_input: dict | Command = state
     result = app.invoke(current_input, config)
-    while result.get("control", ControlState()).hitl_required:
-        result = app.invoke(Command(resume="approve"), config)
-    return result
+    while True:
+        interrupts = result.get("__interrupt__")
+        if not interrupts:
+            return result
+        interrupt_value = (
+            interrupts[0].value if hasattr(interrupts[0], "value") else interrupts[0]
+        )
+        stage = (
+            interrupt_value.get("stage")
+            if isinstance(interrupt_value, dict)
+            else str(interrupt_value)
+        )
+        result = app.invoke(
+            Command(
+                resume=(
+                    "auto"
+                    if stage == "implementation_human"
+                    else "pass"
+                    if stage == "sub_question_acceptance"
+                    else "accept"
+                    if stage == "cross_sub_question"
+                    else "approve"
+                )
+            ),
+            config,
+        )
 
 
-def test_graph_runs_minimal_flow():
-    runtime = AgentRuntime.from_settings(load_settings(output_dir=Path("outputs")))
+def _mock_sub_question_runtime(monkeypatch, output_dir: Path, mode: str):
+    """V14：小题循环 e2e 的 mock runtime，避免真实 LLM 网络调用。"""
+    solution = (
+        "import os\nfrom pathlib import Path\nimport pandas as pd\n"
+        "out = os.environ['MODELING_OUTPUT_DIR']\n"
+        "p = Path(out) / 'results' / 'output.csv'\n"
+        "p.parent.mkdir(parents=True, exist_ok=True)\n"
+        "pd.DataFrame({'answer': [12.5]}).to_csv(p, index=False)\n"
+    )
+    figure = (
+        "import os, matplotlib\nmatplotlib.use('Agg')\nimport matplotlib.pyplot as plt\n"
+        "out = os.environ['MODELING_OUTPUT_DIR']\n"
+        "d = os.path.join(out, 'figures')\n"
+        "os.makedirs(d, exist_ok=True)\n"
+        "plt.plot([1, 2, 3], [1, 4, 9])\n"
+        "plt.savefig(os.path.join(d, 'figure1.png'))\n"
+    )
+
+    def mock_invoke_structured(self, name, state, response_cls, system_prompt=None, fallback_parser=None):
+        if name == "analyst":
+            return AnalystResponse(problem_understanding="x", data_schema={})
+        if name == "mathematician":
+            return MathematicianResponse(plans=[{"id": "p1", "title": "t", "description": "d", "innovation_score": 80, "feasibility_score": 80}])
+        if name == "realist":
+            return RealistResponse(plan_evaluations=[PlanEvaluation(plan_id="p1", innovation_score=80, feasibility_score=80, verdict="keep")])
+        if name == "clarifier":
+            return ClarifierResponse(assumptions=["a"], nomenclature={"x": "x"}, equations=["y=x"], objective="o", solution_outline="s", commit_summary="v")
+        if name == "milestone_reviewer_1":
+            return MilestoneReviewer1Response(approval=True, issues=[], feedback="ok")
+        if name == "architect":
+            return ArchitectResponse(
+                outline={"摘要": "a", "问题重述": "b", "模型建立": "c", "模型求解": "d", "结果分析": "e"},
+                pseudocode=["s1"],
+                algorithms_summary="alg",
+                result_contract=ResultContract(allow_single_row=True),
+            )
+        if name == "coder":
+            return CoderResponse(code=solution, result_path="results/output.csv")
+        if name == "drawer":
+            return DrawerResponse(
+                figure_code=figure,
+                figure_paths=["figures/figure1.png"],
+                observation="",
+                observation_verdict="inconclusive",
+                observation_confidence=0.3,
+            )
+        if name == "reflection":
+            return ReflectionResponse(findings=[], run_summary="ok")
+        if name == "data_analyst":
+            return DataIntelligenceResponse(insights=["i"])
+        if name == "writer":
+            return WriterResponse(latex_content="\\documentclass{article}\n")
+        raise AssertionError(f"unexpected prompt: {name}")
+
+    monkeypatch.setattr(AgentRuntime, "invoke_structured", mock_invoke_structured)
+    monkeypatch.setattr(
+        AgentRuntime, "invoke", lambda self, name, state, system_prompt=None: "kw"
+    )
+    return AgentRuntime.from_settings(
+        AppSettings(
+            output_dir=output_dir,
+            api_key_env="MISSING_KEY_FOR_TEST",
+            coder_external_mode=mode,
+            search_enabled=False,
+        )
+    )
+
+
+def test_graph_runs_minimal_sub_question_flow(tmp_path, monkeypatch):
+    """V14：小题循环 minimal flow——单小题 human 模式全链路。"""
+    runtime = _mock_sub_question_runtime(monkeypatch, tmp_path / "outputs", "human")
     app = build_graph(runtime=runtime)
     config = {"configurable": {"thread_id": "test-minimal"}}
 
     final_state = _run_to_completion(
         app,
         {
-            "static_ltm": StaticLTM(raw_problem="预测交通拥堵并优化信号灯。"),
+            "static_ltm": StaticLTM(raw_problem="问题1 预测交通拥堵。"),
             "dynamic_ltm": DynamicLTM(),
             "ltm_archive": [],
             "control": ControlState(),
@@ -44,36 +151,24 @@ def test_graph_runs_minimal_flow():
     )
 
     assert final_state["control"].phase == "completed"
-    assert final_state["static_ltm"].raw_problem == "预测交通拥堵并优化信号灯。"
-    assert final_state["static_ltm"].problem_understanding
-    assert isinstance(final_state["dynamic_ltm"].assumptions, list)
-    assert isinstance(final_state["dynamic_ltm"].nomenclature, dict)
-    assert isinstance(final_state["dynamic_ltm"].equations, list)
-    assert final_state["dynamic_ltm"].objective
-    assert final_state["dynamic_ltm"].solution_outline
+    assert final_state["static_ltm"].raw_problem == "问题1 预测交通拥堵。"
+    ctrl = final_state["control"]
+    assert ctrl.sub_questions == ["问题1 预测交通拥堵。"]
+    assert len(ctrl.sub_results) == 1
     assert len(final_state["ltm_archive"]) >= 1
-    assert final_state["artifacts"].figure_paths
+    assert any("q1.csv" in p for p in final_state["artifacts"].result_paths)
     assert final_state["artifacts"].latex_path
-    assert {"coder", "drawer", "writer"}.issubset(final_state["prompt_audit"])
-    # result_paths 依赖 Coder 在真实数据上执行成功；降级模式（无有效 API key）下可能为空
-    if final_state["artifacts"].result_paths:
-        assert all(isinstance(p, str) for p in final_state["artifacts"].result_paths)
+    assert {"coder", "writer"}.issubset(final_state["prompt_audit"])
 
 
-def test_runtime_settings_are_copied_into_control_state():
-    runtime = AgentRuntime.from_settings(
-        load_settings(
-            max_debate_rounds=5,
-            innovation_threshold=70,
-            feasibility_threshold=65,
-            innovation_weight=0.6,
-            feasibility_weight=0.4,
-            output_dir=Path("outputs"),
-            llm_model="deepseek-chat",
-            api_key_env="DEEPSEEK_API_KEY",
-            api_base_url="https://api.deepseek.com",
-        )
-    )
+def test_runtime_settings_are_copied_into_control_state(tmp_path, monkeypatch):
+    """V14：配置仍应复制进 control，且 builtin 模式在小题循环中可用。"""
+    runtime = _mock_sub_question_runtime(monkeypatch, tmp_path / "outputs", "builtin")
+    runtime.settings.max_debate_rounds = 5
+    runtime.settings.innovation_threshold = 70
+    runtime.settings.feasibility_threshold = 65
+    runtime.settings.innovation_weight = 0.6
+    runtime.settings.feasibility_weight = 0.4
     app = build_graph(runtime=runtime)
     config = {"configurable": {"thread_id": "test-settings"}}
 
@@ -96,9 +191,8 @@ def test_runtime_settings_are_copied_into_control_state():
     assert final_state["control"].innovation_weight == 0.6
     assert final_state["control"].feasibility_weight == 0.4
     assert final_state["control"].phase == "completed"
-    # 同上，result_paths 在降级模式下可能为空
-    if final_state["artifacts"].result_paths:
-        assert all(isinstance(p, str) for p in final_state["artifacts"].result_paths)
+    assert len(final_state["control"].sub_results) == 1
+    assert any("q1.csv" in p for p in final_state["artifacts"].result_paths)
 
 
 def test_realist_pruning_filters_low_feasibility():
@@ -362,6 +456,10 @@ def test_route_after_final_review_goes_to_rollback():
 
     state = {"control": ControlState()}
     assert route_after_final_review(state) == "hitl_final"
+
+    # V15：rewrite 决策（paper_rewrite_requested）应回 Writer 重写论文
+    state = {"control": ControlState(phase="paper_rewrite_requested")}
+    assert route_after_final_review(state) == "writer"
 
 
 def test_route_after_rollback_respects_source():

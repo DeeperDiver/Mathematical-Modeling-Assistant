@@ -9,6 +9,24 @@
 - **若没有数据文件（data_file_paths_json 为空数组），必须从题目给定参数/动态 LTM 的假设中提取数值常量，用 numpy 构造数值解，不得调用 pd.read_csv 读取不存在的文件。**
 - **依赖约束**：只能使用以下已保证安装的库：numpy、pandas、scipy、scikit-learn (sklearn)、statsmodels、matplotlib、networkx、pulp。禁止 import seaborn、plotly、bokeh、xgboost、lightgbm、imblearn (imbalanced-learn)、shap、lifelines、pymer4、arviz 等未保证安装的库，否则代码执行会失败。替代方案：梯度提升模型用 sklearn.ensemble.GradientBoostingClassifier/Regressor；类别不平衡用 sklearn.utils.resample 手动过采样或 class_weight 参数；特征重要性用 sklearn 内置的 feature_importances_ 属性。
 - **执行时间约束**：代码总执行时间不得超过 90 秒。避免以下高耗时操作：Bootstrap 重抽样超过 200 次、网格搜索步长小于 0.5、嵌套循环总迭代超过 10^6、大规模矩阵特征分解。如需统计推断，优先使用解析近似（如正态近似置信区间）而非重抽样。
+- **列名硬性规则（V16 必须遵守）**：
+  - 写任何访问数据的代码之前，必须先 `print(df.columns.tolist())` 打印实际列名。
+  - 访问列一律以打印出的实际列名为准；列名是中文或数字时用原样字符串访问
+    （如 `df['需求量(kg)']`、`DIST['0']`），**禁止臆造英文别名**（如 `cap_w`、`vehicle_id`）。
+  - 数据列清单按文件分组提供（见下方 data_columns_json），先确认目标文件再写读取代码；
+    多附件异构表（订单表/距离矩阵/时间窗）必须按文件分别读取、按需关联，
+    不要假设已合并成一张表。
+  - 若需要的列名不在数据画像中：要么先 `df['新列名'] = ...` 创建派生列，
+    要么用 `df.rename(columns={{'旧名': '新名'}}, inplace=True)` 后访问新名；
+    直接访问不存在的列会被系统 AST 校验打回。
+
+【编码阶段常见错误与代码规范】（method_knowledge_active={method_knowledge_active}；开启时必须遵守）
+以下是数学建模通用编码规范与高频错误清单。编码时必须避免其中的常见错误：
+
+{coding_knowledge}
+
+【当前题型专属指南与防错】（{problem_type}）
+{type_knowledge}
 
 【V11 关键常量校验】（必须严格遵守）：
 系统已从题目原文机器提取了所有带单位的数值常量（problem_facts）。你在代码中使用的物理参数
@@ -46,11 +64,27 @@ problem_facts 列表：
 如果 data_parse_hints_json 非空，必须**严格按照其中的 parse_hint 解析对应列**。
 例如提示说 `df['孕周'].str.replace('W','').astype(float)`，就必须这样写，不得自创解析方式。
 
+【数据智能摘要】（LLM 已基于数据概要提炼，帮助你理解每个文件的语义与关联方式）：
+{data_intelligence_json}
+
+【小题上下文】（V14：前小题 LTM 与结果路径；本小题代码可读取前小题结果，但不得修改其文件）：
+{sub_question_context_json}
+
 动态 LTM：
 {dynamic_ltm_json}
 
 Architect 产物：
 {artifacts_json}
+
+【结果契约】（Architect 声明的输出规格，必须严格遵守）：
+{result_contract_json}
+
+结果契约硬性要求：
+- 若契约声明了输出列，结果 CSV 必须包含这些列；列名、dtype、min/max 必须符合。
+- 若 `allow_single_row: true`，可以只输出一行（标量答案），
+  **不要为了凑行数伪造数据或多写无意义行**。
+- 若某列 `distinct_required: true`，不同样本/分组必须给出不同值，不得全部相同。
+- 若契约未声明任何列（`{{}}`），仍须输出有意义、可读的结果表。
 
 真实数据文件路径：
 {data_file_paths_json}
@@ -58,7 +92,7 @@ Architect 产物：
 数据列信息：
 {data_columns_json}
 
-完整数据画像：
+数据概要（只含行列结构信息，不含原始数据；原始数据请在代码运行时读取）：
 {data_profile_json}
 
 历史错误日志（如有，请针对性修正）：
@@ -88,18 +122,30 @@ Architect 产物：
 必须按此方式读取数据并保存结果：
 ```python
 import os
+import json
 import pandas as pd
 
 DATA_PATH = os.environ.get("MODELING_DATA_PATH", "")
-df = pd.read_csv(DATA_PATH)  # 或 pd.read_excel(DATA_PATH)，根据文件扩展名选择
+DATA_PATHS = json.loads(os.environ.get("MODELING_DATA_PATHS", "[]"))
+
+# 多附件场景：先枚举所有数据文件，明确每个文件的角色后再读取
+# 不要在不知道结构的情况下假设它们已经合并成一张表
+if len(DATA_PATHS) > 1:
+    for i, p in enumerate(DATA_PATHS):
+        tmp = pd.read_excel(p) if p.lower().endswith(('.xlsx', '.xls')) else pd.read_csv(p)
+        print(f"[data {{i}}] {{os.path.basename(p)}} shape={{tmp.shape}} columns={{tmp.columns.tolist()}}")
+    # 根据数据智能摘要和打印结果，按文件分别读取、按需关联
+    df = pd.read_excel(DATA_PATHS[0])  # 示例：第一个文件；实际按题目需要选择
+else:
+    df = pd.read_csv(DATA_PATH)  # 或 pd.read_excel(DATA_PATH)，根据文件扩展名选择
 
 # 字符串列解析（必须遵守 parse_hints）
 # 例如：df['孕周'] = df['孕周'].str.replace('W','').astype(float)
 # 例如：df['检测日期'] = pd.to_datetime(df['检测日期'])
 
-# 结果必须写到 MODELING_OUTPUT_DIR 下的 results/output.csv
+# 结果必须写到 MODELING_OUTPUT_DIR 下的 results/{result_output_filename}
 OUTPUT_DIR = os.environ.get("MODELING_OUTPUT_DIR", ".")
-RESULT_PATH = os.path.join(OUTPUT_DIR, "results", "output.csv")
+RESULT_PATH = os.path.join(OUTPUT_DIR, "results", "{result_output_filename}")
 os.makedirs(os.path.dirname(RESULT_PATH), exist_ok=True)
 df.to_csv(RESULT_PATH, index=False)
 ```
@@ -127,9 +173,9 @@ import pandas as pd
 #     ...
 #     results.append({{"t": t, "covered": int(is_covered)}})
 
-# 结果必须写到 MODELING_OUTPUT_DIR 下的 results/output.csv
+# 结果必须写到 MODELING_OUTPUT_DIR 下的 results/{result_output_filename}
 OUTPUT_DIR = os.environ.get("MODELING_OUTPUT_DIR", ".")
-RESULT_PATH = os.path.join(OUTPUT_DIR, "results", "output.csv")
+RESULT_PATH = os.path.join(OUTPUT_DIR, "results", "{result_output_filename}")
 os.makedirs(os.path.dirname(RESULT_PATH), exist_ok=True)
 result_df = pd.DataFrame(results)
 result_df.to_csv(RESULT_PATH, index=False)
@@ -139,7 +185,7 @@ print(f"结果已保存，共 {{len(result_df)}} 行")
 **必须严格按以下 JSON 格式输出（不要包含其他文字）：**
 ```json
 {{
-  "code": "# 在此写入完整的 Python 代码，必须基于真实数据或题目参数执行并保存结果到 MODELING_OUTPUT_DIR/results/output.csv",
-  "result_path": "results/output.csv"
+  "code": "# 在此写入完整的 Python 代码，必须基于真实数据或题目参数执行并保存结果到 MODELING_OUTPUT_DIR/results/{result_output_filename}",
+  "result_path": "results/{result_output_filename}"
 }}
 ```

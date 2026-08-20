@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import logging
 import sys
 from pathlib import Path
@@ -41,7 +42,10 @@ def collect_inputs(path: str | Path) -> list[Path]:
             if candidate.is_file() and candidate.suffix.lower() in (
                 SUPPORTED_EXTENSIONS | {".json"}
             ):
-                if candidate.name in ("problem.txt", "题目.txt"):
+                # 排除题面文件与 OCR 文本缓存（<name>.pdf.ocr.txt）
+                if candidate.name in ("problem.txt", "题目.txt") or candidate.name.endswith(
+                    ".ocr.txt"
+                ):
                     continue
                 files.append(candidate)
         return files
@@ -56,6 +60,17 @@ def main() -> None:
     parser.add_argument("--problem-type", default="", help="强制题型（覆盖自动判定）。")
     parser.add_argument("--problem-text", default="", help="题面文本（当目录内无 problem.txt 时使用）。")
     parser.add_argument("--min-occurrences", type=int, default=3, help="聚合共性所需最少卡片数（默认 3）。")
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="并行摄入线程数（LLM 调用并发，默认 1；建议 3~5）。",
+    )
+    parser.add_argument(
+        "--deterministic-aggregate",
+        action="store_true",
+        help="用确定性统计聚合题型指南（章节归一化+动态阈值），不调用 LLM。",
+    )
     parser.add_argument("--verbose", action="store_true", help="输出 INFO 日志。")
     args = parser.parse_args()
 
@@ -76,21 +91,40 @@ def main() -> None:
         logger.error("未找到任何支持的文件（pdf/tex/md/txt/json）：%s", args.input)
         sys.exit(1)
 
-    ingested: list[str] = []
-    for path in files:
+    def _ingest_one(path: Path):
         problem_file = find_problem_file(path.parent)
         problem_text = (
             problem_file.read_text(encoding="utf-8", errors="replace")
             if problem_file
             else args.problem_text
         )
-        card = ingest_paper(
+        return ingest_paper(
             path,
             problem_text or "",
             runtime=runtime,
             contest=args.contest,
             problem_type=args.problem_type,
         )
+
+    ingested: list[str] = []
+    skipped: list[str] = []
+    to_process: list[Path] = []
+    for path in files:
+        # 幂等：同名卡片已生成则跳过（支持断点续传，避免重复 LLM 调用）
+        expected_id = path.stem
+        if path.suffix.lower() != ".json" and (cards_dir / f"{expected_id}.json").exists():
+            skipped.append(str(path))
+            print(f"[skip] 卡片已存在：{expected_id}")
+            continue
+        to_process.append(path)
+
+    if args.workers > 1 and len(to_process) > 1:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.workers) as pool:
+            results = list(pool.map(_ingest_one, to_process))
+    else:
+        results = [_ingest_one(p) for p in to_process]
+
+    for path, card in zip(to_process, results):
         if card is not None:
             save_card(card, cards_dir)
             ingested.append(str(path))
@@ -98,7 +132,9 @@ def main() -> None:
 
     all_cards = load_cards(cards_dir)
     guides = aggregate_guides(
-        all_cards, min_occurrences=args.min_occurrences, runtime=runtime
+        all_cards,
+        min_occurrences=args.min_occurrences,
+        runtime=None if args.deterministic_aggregate else runtime,
     )
     for guide in guides:
         save_guide(guide, guides_dir)
@@ -108,7 +144,10 @@ def main() -> None:
             + f" 共性章节={len(guide.common_structure)} 推荐图={len(guide.recommended_figures)}"
         )
 
-    print(f"\n完成：新摄入 {len(ingested)} 篇，知识库现有 {len(all_cards)} 张卡片、{len(guides)} 份指南。")
+    print(
+        f"\n完成：新摄入 {len(ingested)} 篇，跳过已存在 {len(skipped)} 篇，"
+        f"知识库现有 {len(all_cards)} 张卡片、{len(guides)} 份指南。"
+    )
 
 
 if __name__ == "__main__":

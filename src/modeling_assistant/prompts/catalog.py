@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -8,6 +9,62 @@ from typing import Any
 from pydantic import BaseModel
 
 from modeling_assistant.memory.archive import archive_summary
+from modeling_assistant.data.paper_template import map_craft_section_to_template
+
+logger = logging.getLogger(__name__)
+
+
+def _compact_column_dict(col) -> dict:
+    """单列紧凑摘要：只保留建模思路需要的结构信息，样例值最多 3 个。"""
+    return {
+        "name": col.name,
+        "dtype": col.dtype,
+        "missing_rate": col.missing_rate,
+        "min": col.min,
+        "max": col.max,
+        "mean": col.mean,
+        "std": col.std,
+        "unique_count": col.unique_count,
+        "sample_values": (col.sample_values or [])[:3],
+        "parse_hint": col.parse_hint,
+    }
+
+
+def _compact_profile_dict(profile) -> dict:
+    """数据画像的紧凑摘要：按文件保留边界，只含行列结构信息。
+
+    V12 修复：原始数据（sample_head、全量相关性矩阵、全量样例）不进 prompt。
+    LLM 只需要知道"每个文件是什么、有哪些列、列的类型/范围/缺失情况"，
+    具体数值由 Coder 生成的代码在运行时读取。
+    """
+    files: list[dict] = []
+    for fs in getattr(profile, "file_summaries", None) or []:
+        files.append(
+            {
+                "path": fs.path,
+                "rows": fs.rows,
+                "cols": fs.cols,
+                "issues": list(fs.issues or []),
+                "columns": [_compact_column_dict(c) for c in fs.columns],
+            }
+        )
+    if not files:
+        # 旧状态兜底：合并画像退化为单文件摘要
+        files.append(
+            {
+                "path": profile.file_paths[0] if profile.file_paths else "",
+                "rows": profile.total_rows,
+                "cols": profile.total_cols,
+                "issues": list(profile.issues or []),
+                "columns": [_compact_column_dict(c) for c in profile.columns],
+            }
+        )
+    return {
+        "total_rows": profile.total_rows,
+        "total_cols": profile.total_cols,
+        "issues": list(profile.issues or []),
+        "files": files,
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +140,65 @@ class PromptContext:
                 ensure_ascii=False,
                 indent=2,
             )
+        # V14 小题循环：前小题 LTM 摘要 + 结果路径，供当前小题建模/实现/成稿引用
+        sub_question_context_json = "[]"
+        result_output_filename = "output.csv"
+        # V17 结果注册表与章节绑定（Writer 成稿时只允许引用权威结果）
+        result_manifest_json = "[]"
+        section_result_binding_json = "{}"
+        # V17 图表注册表（Writer 只允许引用 manifest 中已生成的图）
+        figure_manifest_json = "{}"
+        if self.artifacts is not None:
+            fm = getattr(self.artifacts, "figure_manifest", None)
+            if isinstance(fm, BaseModel):
+                fm = fm.model_dump(mode="json")
+            if isinstance(fm, dict):
+                figure_manifest_json = json.dumps(fm, ensure_ascii=False, indent=2)
+        if self.control is not None:
+            ctrl_data = self.control.model_dump(mode="json")
+            questions = ctrl_data.get("sub_questions", []) or []
+            idx = ctrl_data.get("current_sub_question_index", 0) or 0
+            if questions:
+                result_output_filename = f"q{idx + 1}.csv"
+            result_manifest_json = json.dumps(
+                ctrl_data.get("results_manifest", []) or [],
+                ensure_ascii=False,
+                indent=2,
+            )
+            n = len(questions) if questions else 1
+            section_result_binding_json = json.dumps(
+                {f"{4 + i}_problem{i}.tex": i - 1 for i in range(1, n + 1)},
+                ensure_ascii=False,
+                indent=2,
+            )
+            prev_ltms = []
+            for i, ltm in enumerate(ctrl_data.get("sub_ltms", []) or []):
+                if i >= idx:
+                    continue
+                prev_ltms.append(
+                    {
+                        "index": i,
+                        "objective": ltm.get("objective", ""),
+                        "assumptions": list(ltm.get("assumptions", []) or []),
+                        "equations": list(ltm.get("equations", []) or []),
+                    }
+                )
+            prev_results = [
+                r
+                for r in (ctrl_data.get("sub_results", []) or [])
+                if r.get("index", 0) < idx
+            ]
+            sub_question_context_json = json.dumps(
+                {
+                    "current_index": idx,
+                    "current_text": questions[idx] if idx < len(questions) else "",
+                    "total": len(questions),
+                    "previous_sub_ltms": prev_ltms,
+                    "previous_sub_results": prev_results,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
         # archive 摘要视图（轻量，仅含版本号与变更说明）
         archive_summary_json = json.dumps(
             archive_summary(list(self.archive or [])),
@@ -94,8 +210,10 @@ class PromptContext:
         data_file_paths_json = "[]"
         data_columns_json = "[]"
         data_findings_json = "[]"
+        data_intelligence_json = "[]"
         # V11 修复：机器生成的字符串列解析建议，供 clarifier/coder 直接引用
         data_parse_hints_json = "[]"
+        profile = None
         if self.static_ltm is not None:
             profile = getattr(self.static_ltm, "data_profile", None)
             # V11.4 修复：LangGraph checkpoint 反序列化时，data_profile 可能变成 dict
@@ -108,17 +226,37 @@ class PromptContext:
                 except Exception:
                     profile = None
             if profile is not None:
-                data_profile_json = profile.model_dump_json(indent=2)
+                # V12 修复：只注入紧凑摘要，绝不把 sample_head/全量相关性矩阵/全量样例放进 prompt
+                data_profile_json = json.dumps(
+                    _compact_profile_dict(profile),
+                    ensure_ascii=False,
+                    indent=2,
+                )
                 data_file_paths_json = json.dumps(
                     profile.file_paths,
                     ensure_ascii=False,
                     indent=2,
                 )
+                # V16 修复：列名按文件分组注入，并附带样例值。
+                # 旧实现把多附件所有列扁平合并（如距离矩阵 99 个数字列名混着中文列名），
+                # Coder 无法判断「哪个文件有哪些列」，导致反复臆造列名被 AST 校验打回。
+                file_columns = []
+                for fs in profile.file_summaries:
+                    file_columns.append(
+                        {
+                            "file": Path(fs.path).name,
+                            "columns": [
+                                {
+                                    "name": col.name,
+                                    "dtype": col.dtype,
+                                    "sample_values": (col.sample_values or [])[:3],
+                                }
+                                for col in fs.columns
+                            ],
+                        }
+                    )
                 data_columns_json = json.dumps(
-                    [
-                        {"name": col.name, "dtype": col.dtype}
-                        for col in profile.columns
-                    ],
+                    file_columns,
                     ensure_ascii=False,
                     indent=2,
                 )
@@ -138,6 +276,36 @@ class PromptContext:
                 ensure_ascii=False,
                 indent=2,
             )
+            # V12 新增：LLM 数据理解分析师提炼的"解题所需信息"
+            if isinstance(self.static_ltm, dict):
+                data_intelligence = self.static_ltm.get("data_intelligence", []) or []
+            else:
+                data_intelligence = getattr(self.static_ltm, "data_intelligence", []) or []
+            data_intelligence_json = json.dumps(
+                data_intelligence,
+                ensure_ascii=False,
+                indent=2,
+            )
+        # V12 修复：static_ltm_json 不再携带原始 data_profile（sample_head/相关性矩阵等），
+        # 只带 data_profile_summary（紧凑摘要）+ 其余字段
+        static_ltm_json = "{}"
+        if self.static_ltm is not None:
+            if isinstance(self.static_ltm, BaseModel):
+                static_data = self.static_ltm.model_dump(mode="json", exclude={"data_profile"})
+            else:
+                static_data = dict(self.static_ltm)
+                static_data.pop("data_profile", None)
+            if profile is not None:
+                static_data["data_profile_summary"] = _compact_profile_dict(profile)
+            static_ltm_json = json.dumps(static_data, ensure_ascii=False, indent=2)
+        # V12 新增：Architect 声明的结果契约（Architect → Coder → ResultReviewer 共用）
+        result_contract_json = "{}"
+        if self.artifacts is not None:
+            rc = getattr(self.artifacts, "result_contract", None)
+            if isinstance(rc, BaseModel):
+                result_contract_json = rc.model_dump_json(indent=2)
+            elif rc is not None:
+                result_contract_json = json.dumps(rc, ensure_ascii=False, indent=2)
         # ── empirical 层注入（默认只注入 L2 摘要，L3 原始日志按需查询）──
         empirical_refuted_json = "[]"
         empirical_open_questions_json = "[]"
@@ -247,6 +415,13 @@ class PromptContext:
         exemplar_highlights_json = "[]"
         exemplar_quotes_json = "[]"
         style_profile_json = "{}"
+        craft_derivation_json = "[]"
+        craft_algorithm_json = "[]"
+        craft_interpretation_json = "[]"
+        craft_writing_json = "[]"
+        craft_figure_placement_json = "[]"
+        craft_section_focus_json = "[]"
+        craft_argument_flow_json = "{}"
         if self.exemplars is not None:
             from modeling_assistant.schemas.state import (
                 ExemplarPaper,
@@ -342,8 +517,101 @@ class PromptContext:
             )
             if profile is not None:
                 style_profile_json = profile.model_dump_json(indent=2)
+            # ── 行文技艺参考（craft 层，与 writing 注入开关同步）──
+            craft_raw = ctx_data.get("craft")
+            if isinstance(craft_raw, dict) and injection.get("writing", True):
+                from modeling_assistant.schemas.craft import CraftGuide
+
+                try:
+                    craft = CraftGuide.model_validate(craft_raw)
+                    craft_derivation_json = json.dumps(
+                        [d.model_dump() for d in craft.derivation_common],
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                    craft_algorithm_json = json.dumps(
+                        [a.model_dump() for a in craft.algorithm_common],
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                    craft_interpretation_json = json.dumps(
+                        [i.model_dump() for i in craft.interpretation_common],
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                    craft_writing_json = json.dumps(
+                        [w.model_dump() for w in craft.writing_common],
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                    craft_figure_placement_json = json.dumps(
+                        [f.model_dump() for f in craft.figure_placement_common],
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                    craft_section_focus_json = json.dumps(
+                        [
+                            {
+                                **s.model_dump(),
+                                # 与国赛 LaTeX 模板章节文件绑定：
+                                # Writer 按此把写作重点落到对应模板章节
+                                "template_file": map_craft_section_to_template(s.section),
+                            }
+                            for s in craft.section_focus_common
+                        ],
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                    if craft.argument_flow_common is not None:
+                        craft_argument_flow_json = craft.argument_flow_common.model_dump_json(
+                            indent=2
+                        )
+                except Exception:
+                    pass
+        # ── V15 方法知识库注入（按节点/题型切片，只影响领域判断）──
+        # 开关来自 AgentRuntime.render_prompt 注入的 extra（默认开启）；
+        # 关闭时所有知识变量为空、active=false，渲染行为与旧版本完全一致。
+        method_knowledge_active = "false"
+        problem_type = "unknown"
+        model_selection_knowledge = ""
+        type_knowledge = ""
+        assumption_knowledge = ""
+        coding_knowledge = ""
+        chart_knowledge = ""
+        method_knowledge_enabled = str(
+            extra.get("method_knowledge_enabled", True)
+        ).strip().lower() in {"1", "true", "yes", "y", "on"}
+        if method_knowledge_enabled:
+            raw_problem = ""
+            problem_understanding = ""
+            if self.static_ltm is not None:
+                raw_problem = getattr(self.static_ltm, "raw_problem", "") or ""
+                problem_understanding = (
+                    getattr(self.static_ltm, "problem_understanding", "") or ""
+                )
+            try:
+                from modeling_assistant.data.method_knowledge import build_knowledge_payload
+                from modeling_assistant.memory.exemplar_search import judge_problem_type
+
+                judged_type, _conf = judge_problem_type(
+                    raw_problem,
+                    problem_understanding=problem_understanding,
+                )
+                # 空题面 + 无破题理解时判定为 unknown，避免误注入某个具体题型知识
+                if not (raw_problem or "").strip() and not (problem_understanding or "").strip():
+                    judged_type = "unknown"
+                knowledge = build_knowledge_payload(judged_type)
+                method_knowledge_active = knowledge["method_knowledge_active"]
+                problem_type = knowledge["problem_type"]
+                model_selection_knowledge = knowledge["model_selection_knowledge"]
+                type_knowledge = knowledge["type_knowledge"]
+                assumption_knowledge = knowledge["assumption_knowledge"]
+                coding_knowledge = knowledge["coding_knowledge"]
+                chart_knowledge = knowledge["chart_knowledge"]
+            except Exception as exc:
+                logger.warning("方法知识库注入失败（降级为空知识）: %s", exc)
         return {
-            "static_ltm_json": _json_model(self.static_ltm),
+            "static_ltm_json": static_ltm_json,
             "dynamic_ltm_json": _json_model(self.dynamic_ltm),
             "archive_json": _json_list(self.archive or []),
             "archive_summary_json": archive_summary_json,
@@ -362,8 +630,18 @@ class PromptContext:
             "data_file_paths_json": data_file_paths_json,
             "data_columns_json": data_columns_json,
             "data_findings_json": data_findings_json,
+            "data_intelligence_json": data_intelligence_json,
+            "sub_question_context_json": sub_question_context_json,
+            "result_output_filename": result_output_filename,
+            # V17 结果注册表与章节绑定
+            "result_manifest_json": result_manifest_json,
+            "section_result_binding_json": section_result_binding_json,
+            # V17 图表注册表
+            "figure_manifest_json": figure_manifest_json,
             # V11 修复：机器生成的字符串列解析建议
             "data_parse_hints_json": data_parse_hints_json,
+            # V12 修复：结果契约
+            "result_contract_json": result_contract_json,
             # V11 修复：机器提取的题目常量
             "problem_facts_json": problem_facts_json,
             # empirical 层
@@ -398,6 +676,28 @@ class PromptContext:
             "exemplar_highlights_json": exemplar_highlights_json,
             "exemplar_quotes_json": exemplar_quotes_json,
             "style_profile_json": style_profile_json,
+            "craft_derivation_json": craft_derivation_json,
+            "craft_algorithm_json": craft_algorithm_json,
+            "craft_interpretation_json": craft_interpretation_json,
+            "craft_writing_json": craft_writing_json,
+            "craft_figure_placement_json": craft_figure_placement_json,
+            "craft_section_focus_json": craft_section_focus_json,
+            "craft_argument_flow_json": craft_argument_flow_json,
+            # V15 方法知识库
+            "method_knowledge_active": method_knowledge_active,
+            "problem_type": problem_type,
+            "model_selection_knowledge": model_selection_knowledge,
+            "type_knowledge": type_knowledge,
+            "assumption_knowledge": assumption_knowledge,
+            "coding_knowledge": coding_knowledge,
+            "chart_knowledge": chart_knowledge,
+            # V15 终审 LLM 审查：论文全文（final_reviewer_node 注入，缺失时为空）
+            "paper_text": str(extra.get("paper_text", "")),
+            # V15 论文修订反馈（writer_node 注入，首次撰写时为空）
+            "paper_revision_feedback": str(extra.get("paper_revision_feedback", "")),
+            # V15 论文模板（AgentRuntime.render_prompt 注入；直接渲染 PromptContext 时默认关闭）
+            "paper_template_active": str(extra.get("paper_template_active", "false")),
+            "paper_template_structure": str(extra.get("paper_template_structure", "[]")),
             **{key: str(value) for key, value in extra.items() if key not in ("recent_stdout", "recent_stderr", "result_preview")},
         }
 

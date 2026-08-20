@@ -11,7 +11,13 @@
 3. equations 与 objective 一致，能支撑解题目标。
 4. 没有引入静态 LTM 中未提及的新约束或新变量。
 
-5. 【表达完整性（弱检查，exemplar_active={exemplar_active}）】若提供了题型结构参考，
+5. 【假设质量参考（弱检查，method_knowledge_active={method_knowledge_active}）】对照以下
+   假设与模型建立规范，检查 assumptions 是否必要、可解释、可参数化、物理/业务约束是否
+   优先于拟合好看；明显违反时在 feedback 中提示，不作为硬拒绝。
+
+{assumption_knowledge}
+
+6. 【表达完整性（弱检查，exemplar_active={exemplar_active}）】若提供了题型结构参考，
    可对照检查动态 LTM 的 solution_outline 是否覆盖参考骨架中的核心章节
    （如问题重述/模型建立/模型求解/结果分析）；缺失时在 feedback 中提示，不作为硬拒绝。
 

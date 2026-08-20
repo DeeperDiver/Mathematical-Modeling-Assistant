@@ -6,6 +6,11 @@
 - 每个假设必须可验证，每个符号必须唯一定义，每个公式必须可推导。
 - 生成一句 commit_summary，总结本次变更：做了什么、为什么、结果如何。
 
+【假设与模型建立规范】（method_knowledge_active={method_knowledge_active}；开启时提供）
+撰写 assumptions 时必须遵守以下规范：
+
+{assumption_knowledge}
+
 【V11 关键常量校验】（必须严格遵守）：
 系统已从题目原文机器提取了所有带单位的数值常量（problem_facts）。这些值是真理基准，
 你在撰写 assumptions / equations 时**必须原样引用这些数值**，不得改写、省略或近似。
@@ -36,6 +41,12 @@ problem_facts 列表：
 
 【数据列解析建议】（机器自动生成，Coder 必须遵守）：
 {data_parse_hints_json}
+
+【数据智能摘要】（LLM 已基于数据概要提炼：每个文件是什么、关键列、如何关联）：
+{data_intelligence_json}
+
+【小题上下文】（V14：前小题 LTM 与结果，当前小题必须知情但独立建模）：
+{sub_question_context_json}
 
 修正要求：
 - 如果存在 refuted 假设，新 LTM 的 assumptions 必须明确处理该假设（删除、替换为更弱版本、或新增约束）。

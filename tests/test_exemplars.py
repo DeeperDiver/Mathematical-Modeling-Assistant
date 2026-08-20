@@ -172,7 +172,8 @@ def test_search_type_mismatch_inactive(tmp_path):
     assert ctx.active is False
 
 
-def test_search_below_relevance_threshold_inactive(tmp_path):
+def test_search_type_match_injects_even_with_low_text_overlap(tmp_path):
+    """题型命中即注入：表达特征与题面字面重合天然偏低，不应阻断同题型参考。"""
     cards_dir = tmp_path / "cards"
     save_card(
         ExemplarPaper(
@@ -187,8 +188,9 @@ def test_search_below_relevance_threshold_inactive(tmp_path):
     )
     settings = AppSettings(exemplars_dir=tmp_path, exemplar_min_relevance=0.25)
     ctx = search_exemplars("城市绿色物流配送调度优化", settings=settings)
-    # 题型命中但卡片文本与题面无共享 n-gram → 相关性不足
-    assert ctx.active is False
+    # 题型命中但卡片文本与题面无共享 n-gram → 仍注入（同题型兜底）
+    assert ctx.active is True
+    assert [c.id for c in ctx.cards] == ["low1"]
 
 
 # ── 5. Prompt 注入渲染 ───────────────────────────────────────────────────────

@@ -7,6 +7,18 @@
 - 每个方案需给出 innovation_score（创新性 0-100）和 feasibility_score（可行性 0-100）。
 - 如果你请求了分支重建，必须说明原因并指定版本号；系统会优先采用你指定的版本。
 
+【模型选型与方法知识】（method_knowledge_active={method_knowledge_active}；开启时提供）
+当前题型判定：{problem_type}
+以下是数学建模通用选型决策树、五大题型识别与防错速查。发散方案时必须参考其中的
+模型选型逻辑（先判断输出是数值/序列/排名/类别/方程组，再按数据量与约束选型），
+并遵守列出的防错要求（如优化类必须明确变量上下界、评价类必须说明权重来源、
+启发式算法不得直接宣称全局最优等）。
+
+{model_selection_knowledge}
+
+【当前题型专属指南与防错】（{problem_type}）
+{type_knowledge}
+
 【已证伪的假设】（高置信度，禁止再提相关方案，必须在新方案中规避或修正）
 {empirical_refuted_json}
 
@@ -18,6 +30,16 @@
 
 【数据认知更新】（数据加载阶段发现的、对原始 schema 的补充认知，建模时必须考虑）
 {data_findings_json}
+
+【数据智能摘要】（LLM 已基于数据概要提炼：每个文件是什么、关键列、如何关联）：
+{data_intelligence_json}
+
+【小题上下文】（V14：前小题 LTM 与结果，当前小题必须知情但独立建模）：
+{sub_question_context_json}
+
+【参考文献说明】
+静态 LTM 的 literature 字段为系统检索到的参考文献（标题/作者）。
+文献可作为启发和参考，不强制引用，也不得虚构。
 
 静态 LTM：
 {static_ltm_json}

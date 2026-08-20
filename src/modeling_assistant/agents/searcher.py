@@ -17,6 +17,7 @@ class SearchResult:
     """单条检索结果。"""
 
     title: str
+    authors: str = ""
     source: str = ""
     summary: str = ""
     url: str | None = None
@@ -116,12 +117,30 @@ class StubSearcher(Searcher):
 class ArxivSearcher(Searcher):
     """基于 arxiv 库的真实论文检索器。"""
 
+    @staticmethod
+    def _build_search_query(query: SearchQuery) -> str:
+        """构造 ArXiv 查询串：关键词优先 + 题面截断。
+
+        V16 修复：原实现把完整 problem_statement（可长达数千字）直接拼进查询，
+        导致 ArXiv API 返回 400/414（URL 过长/非法字符）。现在：
+        - 关键词取前 5 个，题面只补充前 150 字；
+        - 无关键词时题面截断到 200 字，空则回退默认查询。
+        """
+        keywords = [k.strip() for k in (query.keywords or []) if k.strip()]
+        problem_statement = (query.problem_statement or "").strip()
+        if keywords:
+            parts = keywords[:5]
+            if problem_statement:
+                parts.append(problem_statement[:150])
+            return " ".join(parts)
+        if problem_statement:
+            return problem_statement[:200]
+        return "mathematical modeling"
+
     def search(self, query: SearchQuery) -> list[SearchResult]:
         import arxiv
 
-        search_query = query.problem_statement
-        if query.keywords:
-            search_query = " ".join(query.keywords) + " " + search_query
+        search_query = self._build_search_query(query)
 
         client = arxiv.Client()
         search = arxiv.Search(
@@ -133,6 +152,7 @@ class ArxivSearcher(Searcher):
         for paper in client.results(search):
             results.append(SearchResult(
                 title=paper.title,
+                authors=", ".join(a.name for a in (paper.authors or [])[:5]),
                 source="arxiv",
                 summary=(paper.summary or "")[:500],
                 url=paper.entry_id,

@@ -6,6 +6,11 @@ from typing import Annotated, Any, Literal, TypedDict
 
 from pydantic import BaseModel, Field
 
+from modeling_assistant.schemas.craft import CraftGuide
+
+from modeling_assistant.schemas.responses import FigurePlan, ResultContract, TablePlan
+from modeling_assistant.recording.process_log import ProcessLogEntry
+
 
 def overwrite_reducer(_old: Any, new: Any) -> Any:
     """Keep the latest authoritative LTM value."""
@@ -33,6 +38,7 @@ def merge_dict_reducer(
 
 class LiteratureItem(BaseModel):
     title: str
+    authors: str = ""
     source: str = ""
     summary: str = ""
     url: str | None = None
@@ -56,6 +62,16 @@ class ColumnProfile(BaseModel):
     parse_hint: str = ""
 
 
+class FileSummary(BaseModel):
+    """单个数据文件（或单 sheet）的画像，保留文件边界。"""
+
+    path: str = ""
+    rows: int = 0
+    cols: int = 0
+    columns: list[ColumnProfile] = Field(default_factory=list)
+    issues: list[str] = Field(default_factory=list)
+
+
 class DataProfile(BaseModel):
     """真实数据附件的机器生成画像。"""
 
@@ -66,6 +82,10 @@ class DataProfile(BaseModel):
     correlation_matrix: dict[str, dict[str, float]] = Field(default_factory=dict)
     sample_head: list[dict[str, Any]] = Field(default_factory=list)
     issues: list[str] = Field(default_factory=list)
+    # V12 修复：按文件（保持边界）的独立画像。
+    # 多附件/异构表格不再被合并成一张大表后让 LLM 猜语义，
+    # prompt 只注入 file_summaries 的紧凑摘要，原始数据不进 prompt。
+    file_summaries: list[FileSummary] = Field(default_factory=list)
 
 
 class ProblemFact(BaseModel):
@@ -111,6 +131,11 @@ class StaticLTM(BaseModel):
     # 由 Analyst 节点填充（基于 problem_facts 的 context 推断每个数值的语义角色）
     # 例如：{"3.0": "烟幕下沉速度 m/s", "300.0": "导弹速度 m/s"}
     fact_role_mapping: dict[str, str] = Field(default_factory=dict)
+    # V12 新增：LLM 数据理解分析师提炼的"解题所需信息"。
+    # 例如："附件1是反射率光谱：波数0~4000 cm-1，反射率0~100%，4个文件分别对应
+    # 10°/15°入射角下的SiC/Si样品，建模需按文件分组拟合薄膜厚度。"
+    # 只存语义结论，不存原始数据。
+    data_intelligence: list[str] = Field(default_factory=list)
 
 
 class DynamicLTM(BaseModel):
@@ -156,6 +181,21 @@ class ArtifactBundle(BaseModel):
     # coder/result_reviewer 失败时返回 result_paths=[]，但 reducer 不会清空旧值，
     # 导致路由错乱（route_after_coder 看到非空 result_paths 误判为成功）。
     clear_result_paths: bool = False
+    # V12 修复：Architect 声明的结果契约，ResultReviewer 按契约验证
+    result_contract: ResultContract | None = None
+    # V13 新增：实现架构（算法摘要 + 图表/表格计划）与编程手任务包
+    algorithms_summary: str = ""
+    figures_plan: list[FigurePlan] = Field(default_factory=list)
+    tables_plan: list[TablePlan] = Field(default_factory=list)
+    architecture_spec_md: str = ""
+    coder_task_dir: str = ""
+    # V13：人工编程手交付的绘图代码路径（可选，不存在则为空）
+    human_figure_code_path: str = ""
+    # V17 图表注册表：plan_id -> {"path": 实际文件, "run_id": 来源, "status": "generated"}
+    # 由 drawer_node 按 figures_plan 落盘登记；Writer 只允许引用这里的图。
+    figure_manifest: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    # V17：drawer 失败时置 True，清空 base.figure_manifest（与 clear_result_paths 对称）
+    clear_figure_manifest: bool = False
 
 
 def merge_artifacts_reducer(
@@ -195,6 +235,36 @@ def merge_artifacts_reducer(
             base.result_paths.append(path)
     if incoming.latex_path:
         base.latex_path = incoming.latex_path
+    # V12 修复：契约随 Architect 产物更新；None 表示本轮未声明（保留旧值），
+    # 空契约 ResultContract() 表示"本轮明确无契约"（清掉旧契约）。
+    if incoming.result_contract is not None:
+        base.result_contract = incoming.result_contract
+    # V13 新增：架构计划随 Architect 产物覆盖更新
+    if incoming.algorithms_summary:
+        base.algorithms_summary = incoming.algorithms_summary
+    # V17 修复：图表/表格计划按 plan_id 合并（多轮 Architect 各自补充，
+    # 不再整表覆盖——否则多小题模式下 Writer 只能看到最后一题的图计划）
+    if incoming.figures_plan:
+        plan_by_id = {f.id: f for f in base.figures_plan}
+        for fig in incoming.figures_plan:
+            plan_by_id[fig.id] = fig
+        base.figures_plan = list(plan_by_id.values())
+    if incoming.tables_plan:
+        table_by_id = {t.id: t for t in base.tables_plan}
+        for t in incoming.tables_plan:
+            table_by_id[t.id] = t
+        base.tables_plan = list(table_by_id.values())
+    # V17 图表注册表：按 plan_id 覆盖；drawer 失败时显式清空
+    if incoming.clear_figure_manifest:
+        base.figure_manifest = {}
+    for plan_id, entry in (incoming.figure_manifest or {}).items():
+        base.figure_manifest[plan_id] = entry
+    if incoming.architecture_spec_md:
+        base.architecture_spec_md = incoming.architecture_spec_md
+    if incoming.coder_task_dir:
+        base.coder_task_dir = incoming.coder_task_dir
+    if incoming.human_figure_code_path:
+        base.human_figure_code_path = incoming.human_figure_code_path
     return base
 
 
@@ -294,6 +364,39 @@ def merge_empirical_reducer(
     return base
 
 
+class SubQuestionResult(BaseModel):
+    """单个小题的验收结果与产物记录。"""
+
+    index: int = 0
+    title: str = ""
+    ltm_version: str = ""
+    result_paths: list[str] = Field(default_factory=list)
+    figure_paths: list[str] = Field(default_factory=list)
+    status: Literal["pending", "in_progress", "passed", "failed"] = "pending"
+    feedback: list[str] = Field(default_factory=list)
+
+
+class AuthoritativeResult(BaseModel):
+    """V17 结果注册表条目：小题验收通过时锁定的「唯一权威结果」。
+
+    与 sub_results 的区别：sub_results 只是历史记录；results_manifest 是
+    Writer 成稿与 paper_check 数字校验唯一允许引用的数据源，包含指标快照、
+    来源 run_id 与验收契约，防止多轮执行产生多组「最优结果」后
+    Writer 引用错误文件（如把 q2 的参数写进问题 1 章节）。
+    """
+
+    index: int = 0
+    title: str = ""
+    result_paths: list[str] = Field(default_factory=list)
+    figure_paths: list[str] = Field(default_factory=list)
+    contract: ResultContract | None = None
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    run_id: str = ""
+    status: Literal["passed", "degraded"] = "passed"
+    feedback: list[str] = Field(default_factory=list)
+    accepted_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
 class ControlState(BaseModel):
     phase: str = "init"
     debate_round: int = 0
@@ -313,7 +416,18 @@ class ControlState(BaseModel):
     rebrainstorm_feedback: list[str] = Field(default_factory=list)
     branch_from_version: str | None = None
     hitl_required: bool = False
-    hitl_stage: Literal["architecture", "final", "arbitration", "modeling", "none"] = "none"
+    hitl_stage: Literal[
+        "architecture",
+        "implementation_architecture",
+        "implementation_human",
+        "sub_question_split",
+        "sub_question_acceptance",
+        "cross_sub_question",
+        "final",
+        "arbitration",
+        "modeling",
+        "none",
+    ] = "none"
     rollback_to_version: str | None = None
     rollback_source: Literal["architecture_hitl", "final_hitl", "arbitration", "none"] = "none"
     # ── 实证反思与假设修正 ──
@@ -342,6 +456,34 @@ class ControlState(BaseModel):
     meta_decision: str = ""  # MetaRouterResponse.decision 的值
     meta_direction_hint: str = ""  # 中枢 LLM 给下游节点的方向提示
     meta_reasoning: str = ""  # 中枢 LLM 的决策理由（审计用）
+    # ── V13 编程手模式（人工 / Codex / 内置）──
+    # 架构说明书已经过人类审核，后续 coder 失败回退时不再重复打断审核
+    implementation_architecture_reviewed: bool = False
+    # 人类在"等待人工编程手交付"节点选择 auto → 回退到内置 Coder
+    implementation_auto: bool = False
+    # ── V14 小题循环（Sub-Question Loop）──
+    # 自动拆分并确认后的小题清单；每题独立建模、实现与验收
+    sub_questions: list[str] = Field(default_factory=list)
+    sub_questions_confirmed: bool = False
+    current_sub_question_index: int = 0
+    # 已完成小题的 LTM（与 LTM Archive 版本一一对应）
+    sub_ltms: list[DynamicLTM] = Field(default_factory=list)
+    sub_results: list[SubQuestionResult] = Field(default_factory=list)
+    # V17 结果注册表：每题验收通过的权威结果（Writer / paper_check 唯一数据源）
+    results_manifest: list[AuthoritativeResult] = Field(default_factory=list)
+    # 当前小题的失败/重试次数与预算；通过后重置
+    sub_question_attempts: int = 0
+    sub_question_budget: int = 4
+    sub_question_feedback: list[str] = Field(default_factory=list)
+    # cross <i> <反馈> 的目标小题编号（0-based），触发跨小题 HITL
+    cross_sub_question_target: int = -1
+    # ── V15 论文修订与验收（Paper Revision & Review）──
+    # HITL 终审支持 rewrite <反馈> 回到 Writer 重写论文（有预算防死循环）；
+    # final_reviewer 的验收报告（确定性检查 + LLM 灵活审查）供终审展示。
+    paper_revision_count: int = 0
+    paper_revision_budget: int = 2
+    paper_revision_feedback: list[str] = Field(default_factory=list)
+    paper_review_report: dict[str, Any] = Field(default_factory=dict)
 
 
 # ──────────────── 优秀论文表达学习层（Exemplar Learning System） ────────────────
@@ -413,6 +555,7 @@ class ExemplarContext(BaseModel):
     guide: TypeStyleGuide | None = None
     cards: list[ExemplarPaper] = Field(default_factory=list)
     profile: GlobalStyleProfile | None = None  # L3 全局偏好
+    craft: CraftGuide | None = None  # 行文技艺指南（题型级，深加工层）
     injection: dict[str, bool] = Field(
         default_factory=lambda: {"structure": True, "chart": True, "writing": True}
     )
@@ -427,3 +570,5 @@ class GraphState(TypedDict, total=False):
     artifacts: Annotated[ArtifactBundle, merge_artifacts_reducer]
     prompt_audit: Annotated[dict[str, str], merge_dict_reducer]
     exemplars: Annotated[ExemplarContext, overwrite_reducer]
+    # V17 运行过程记录：逐节点留痕（先落盘 JSONL，state 内保留完整列表）
+    process_log: Annotated[list[ProcessLogEntry], append_reducer]

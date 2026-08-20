@@ -51,6 +51,55 @@ class AppSettings(BaseModel):
     plagiarism_ngram: int = 8  # 查重护栏 n-gram 长度
     plagiarism_threshold: float = 0.15  # 重合率阈值，超过写入完整性警告
     feedback_alpha: float = 0.3  # 反馈回写滑动平均系数
+    # V13 新增：编程手模式
+    # - builtin：主流程内置 Coder 生成代码（默认）
+    # - codex：把"方案与实现架构说明书"打包后，调用本机 Codex CLI
+    #   让另一个 AI 实例实现代码，主流程继续执行与验证
+    coder_external_mode: str = "builtin"
+    coder_external_timeout: int = 600  # 外部编程手单次实现超时（秒）
+    # V15 新增：方法知识库（method knowledge）
+    # 从 references/math_modeling_norms.md 按节点/题型切片注入
+    # Mathematician / Realist / Coder / Clarifier / Drawer 的 prompt，
+    # 只影响领域判断，不改变图结构。关闭时渲染行为与旧版本完全一致。
+    method_knowledge_enabled: bool = True
+    # V15 新增：论文 LaTeX 模板目录（当前内置国赛 CUMCM 模板）
+    # writer 节点把模板复制到 output_dir/paper/ 并按实际子问题数量调整章节，
+    # 论文以「模板格式骨架 + LLM 生成的 sections」方式成稿。
+    # 目录不存在或 main.tex 缺失时回退到旧的「LLM 输出完整 main.tex」行为。
+    paper_template_dir: Path = Path("templates/cumcm-latex")
+    # V15.1 修复：推理模型（如 deepseek-v4-flash）会先消耗大量 reasoning tokens，
+    # 若不显式设置 max_tokens，长 prompt 下可能返回空 content。
+    # 显式给出输出上限，确保 JSON 结构化输出有足够预算。
+    # 实测 clarifier（完整 LTM：假设/符号表/公式/目标/思路）输出可达 8K+ tokens，
+    # 8192 会被 finish=length 截断，故默认 32768。
+    llm_max_tokens: int = 32768
+    # V17 分节点输出预算：coder/writer 需要长输出保留大上限；
+    # 小节点压低，避免 reasoner 推理空转与异常发散。
+    # 原则：cap 必须高于该节点正常峰值输出（+推理余量），否则会截断导致重试。
+    llm_max_tokens_overrides: dict[str, int] = Field(
+        default_factory=lambda: {
+            "coder": 32768,
+            "writer": 32768,
+            "clarifier": 24576,
+            "architect": 12288,
+            "drawer": 12288,
+            "analyst": 8192,
+            "data_analyst": 8192,
+            "mathematician": 8192,
+            "realist": 8192,
+            "reflection": 8192,
+            "final_reviewer": 8192,
+            "arbiter": 4096,
+            "milestone_reviewer_1": 4096,
+            "meta_router": 4096,
+            "searcher": 2048,
+            "exemplar_type_judge": 2048,
+        }
+    )
+
+    def max_tokens_for(self, prompt_name: str) -> int:
+        """按节点返回输出上限：有覆盖用覆盖，否则用全局默认。"""
+        return self.llm_max_tokens_overrides.get(prompt_name, self.llm_max_tokens)
 
     @property
     def api_key(self) -> str | None:
@@ -126,17 +175,33 @@ def load_settings(env_file: str | Path = ".env", **overrides: Any) -> AppSetting
         or file_values.get("MODELING_ASSISTANT_PLAGIARISM_THRESHOLD"),
         "feedback_alpha": os.getenv("MODELING_ASSISTANT_FEEDBACK_ALPHA")
         or file_values.get("MODELING_ASSISTANT_FEEDBACK_ALPHA"),
+        "coder_external_mode": os.getenv("MODELING_ASSISTANT_CODER_EXTERNAL_MODE")
+        or file_values.get("MODELING_ASSISTANT_CODER_EXTERNAL_MODE"),
+        "coder_external_timeout": os.getenv("MODELING_ASSISTANT_CODER_EXTERNAL_TIMEOUT")
+        or file_values.get("MODELING_ASSISTANT_CODER_EXTERNAL_TIMEOUT"),
+        "method_knowledge_enabled": os.getenv("MODELING_ASSISTANT_METHOD_KNOWLEDGE_ENABLED")
+        or file_values.get("MODELING_ASSISTANT_METHOD_KNOWLEDGE_ENABLED"),
+        "paper_template_dir": os.getenv("MODELING_ASSISTANT_PAPER_TEMPLATE_DIR")
+        or file_values.get("MODELING_ASSISTANT_PAPER_TEMPLATE_DIR"),
+        "llm_max_tokens": os.getenv("MODELING_ASSISTANT_LLM_MAX_TOKENS")
+        or file_values.get("MODELING_ASSISTANT_LLM_MAX_TOKENS"),
+        "llm_max_tokens_overrides": os.getenv("MODELING_ASSISTANT_LLM_MAX_TOKENS_OVERRIDES")
+        or file_values.get("MODELING_ASSISTANT_LLM_MAX_TOKENS_OVERRIDES"),
     }
 
     values: dict[str, Any] = {key: value for key, value in raw_values.items() if value is not None}
     if "search_enabled" in values:
         values["search_enabled"] = _parse_bool(values["search_enabled"])
+    if "method_knowledge_enabled" in values:
+        values["method_knowledge_enabled"] = _parse_bool(values["method_knowledge_enabled"])
     for key in (
         "max_debate_rounds",
         "innovation_threshold",
         "feasibility_threshold",
         "exemplar_top_k",
         "plagiarism_ngram",
+        "coder_external_timeout",
+        "llm_max_tokens",
     ):
         if key in values:
             values[key] = int(values[key])
@@ -156,6 +221,14 @@ def load_settings(env_file: str | Path = ".env", **overrides: Any) -> AppSetting
         except json.JSONDecodeError:
             # 配置损坏时回退默认值
             values["style_injection"] = {"structure": 1.0, "chart": 0.8, "writing": 0.5}
+    if "llm_max_tokens_overrides" in values:
+        try:
+            values["llm_max_tokens_overrides"] = json.loads(
+                values["llm_max_tokens_overrides"]
+            )
+        except (json.JSONDecodeError, TypeError):
+            # 配置损坏时回退默认覆盖
+            values.pop("llm_max_tokens_overrides", None)
 
     values.update(overrides)
     return AppSettings(**values)

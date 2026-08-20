@@ -1,0 +1,22 @@
+{
+  "problem_type": "forecasting",
+  "contest": "国赛",
+  "common_structure": [],
+  "structure_variants": [
+    "问题重述",
+    "模型假设",
+    "模型建立"
+  ],
+  "recommended_figures": [
+    "line"
+  ],
+  "writing_baseline": {},
+  "common_pitfalls": [],
+  "exemplar_ids": [
+    "2022_E_E014",
+    "2023_C_C126"
+  ],
+  "quality_score": 0.5,
+  "version": "1.0",
+  "updated_at": "2026-08-18T17:07:58.893192Z"
+}

@@ -17,6 +17,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from modeling_assistant.schemas.responses import ResultContract
 from modeling_assistant.schemas.state import (
     ArtifactBundle,
     ControlState,
@@ -26,6 +27,7 @@ from modeling_assistant.schemas.state import (
     GraphState,
     REFUTED_CONFIDENCE_THRESHOLD,
 )
+from modeling_assistant.recording.process_log import make_entry, write_log_line
 
 logger = logging.getLogger(__name__)
 
@@ -119,13 +121,101 @@ def _check_empty_or_trivial(df: pd.DataFrame) -> list[str]:
     return issues
 
 
-def validate_result(result_path: str | Path) -> dict[str, Any]:
-    """验证单个结果文件，返回验证报告。"""
+def _contract_active(contract: ResultContract | None) -> bool:
+    """契约是否包含有效约束。
+
+    空契约 ResultContract()（Architect fallback）视为"无契约"，
+    走旧的通用启发式校验；只有真正声明了列/行数/单行答案的契约才启用契约模式。
+    """
+    if contract is None:
+        return False
+    return bool(
+        contract.columns
+        or contract.min_rows is not None
+        or contract.max_rows is not None
+        or contract.allow_single_row
+        or contract.description
+    )
+
+
+def _check_contract(
+    df: pd.DataFrame,
+    contract: ResultContract,
+) -> tuple[list[str], list[str]]:
+    """按 Architect 声明的结果契约校验。
+
+    返回 (硬性问题, 警告)。硬性问题会导致拒绝：
+    - 必需列缺失 / 数值列类型不符
+    - 行数超出契约范围
+    - 列值超出契约声明的 min/max
+    - distinct_required=True 的列没有区分度
+
+    其余通用启发式（单行、常量列、概率范围等）降级为警告，
+    避免"正确答案是单行标量"或"共享常量列"被误杀。
+    """
+    hard: list[str] = []
+    warnings: list[str] = []
+
+    required_names = [c.name for c in contract.columns]
+    missing = [n for n in required_names if n not in df.columns]
+    if missing:
+        hard.append(
+            f"结果缺少契约要求的列：{missing}（实际列：{list(df.columns)[:20]}）"
+        )
+
+    if contract.min_rows is not None and len(df) < contract.min_rows:
+        hard.append(f"结果行数 {len(df)} 小于契约最小行数 {contract.min_rows}")
+    if contract.max_rows is not None and len(df) > contract.max_rows:
+        hard.append(f"结果行数 {len(df)} 大于契约最大行数 {contract.max_rows}")
+
+    for spec in contract.columns:
+        if spec.name not in df.columns:
+            continue
+        col = df[spec.name]
+        if spec.dtype in ("int", "float"):
+            if not pd.api.types.is_numeric_dtype(col):
+                hard.append(
+                    f"契约要求列 '{spec.name}' 为数值列，实际 dtype={col.dtype}"
+                )
+                continue
+            numeric = pd.to_numeric(col, errors="coerce").dropna()
+            if numeric.empty:
+                continue
+            if spec.min is not None and float(numeric.min()) < spec.min - 1e-6:
+                hard.append(
+                    f"列 '{spec.name}' 最小值 {float(numeric.min()):g} 低于契约下限 {spec.min:g}"
+                )
+            if spec.max is not None and float(numeric.max()) > spec.max + 1e-6:
+                hard.append(
+                    f"列 '{spec.name}' 最大值 {float(numeric.max()):g} 高于契约上限 {spec.max:g}"
+                )
+        if spec.distinct_required:
+            nunique = col.nunique(dropna=True)
+            if nunique <= 1:
+                hard.append(
+                    f"列 '{spec.name}' 为常量，但契约要求不同样本/分组必须有区分度"
+                )
+    return hard, warnings
+
+
+def validate_result(
+    result_path: str | Path,
+    contract: ResultContract | None = None,
+) -> dict[str, Any]:
+    """验证单个结果文件，返回验证报告。
+
+    V12 修复：有契约时按契约验证（单行标量答案/共享常量列不再被误杀）；
+    无契约时保留旧通用启发式行为（向后兼容）。
+    """
+    # LangGraph checkpoint 可能把契约反序列化为 dict
+    if isinstance(contract, dict):
+        contract = ResultContract.model_validate(contract)
     path = Path(result_path)
     report: dict[str, Any] = {
         "passed": False,
         "path": str(path),
         "issues": [],
+        "warnings": [],
         "metrics": {},
         "sanity_checks": [],
     }
@@ -139,10 +229,35 @@ def validate_result(result_path: str | Path) -> dict[str, Any]:
         report["issues"].append("无法读取结果文件。")
         return report
 
-    issues: list[str] = []
-    issues.extend(_check_empty_or_trivial(df))
-    issues.extend(_check_nan_inf(df))
-    issues.extend(_check_reasonable_ranges(df))
+    hard_issues: list[str] = []
+    warnings: list[str] = []
+
+    if df.empty:
+        hard_issues.append("结果文件为空表。")
+    else:
+        # NaN/Inf 无论是否有契约都是硬性问题
+        hard_issues.extend(_check_nan_inf(df))
+        if _contract_active(contract):
+            contract_hard, contract_warnings = _check_contract(df, contract)
+            hard_issues.extend(contract_hard)
+            warnings.extend(contract_warnings)
+
+            if len(df) == 1 and not contract.allow_single_row:
+                warnings.append(
+                    "结果文件只有一行（若这是合法的标量答案，"
+                    "请在结果契约中设置 allow_single_row=true）。"
+                )
+            numeric_df = df.select_dtypes(include=["number"])
+            for col in numeric_df.columns:
+                if numeric_df[col].nunique(dropna=True) <= 1:
+                    warnings.append(
+                        f"数值列 '{col}' 为常量（契约未要求区分度，仅作提示）。"
+                    )
+            warnings.extend(_check_reasonable_ranges(df))
+        else:
+            # 无契约：保留旧的通用启发式作为硬门槛
+            hard_issues.extend(_check_empty_or_trivial(df))
+            hard_issues.extend(_check_reasonable_ranges(df))
 
     # 基础统计指标
     numeric_df = df.select_dtypes(include=["number"])
@@ -170,25 +285,32 @@ def validate_result(result_path: str | Path) -> dict[str, Any]:
     else:
         sanity_checks.append(f"数值列：{list(numeric_df.columns)}")
 
-    report["issues"] = issues
+    report["issues"] = hard_issues
+    report["warnings"] = warnings
     report["sanity_checks"] = sanity_checks
-    report["passed"] = len(issues) == 0
+    report["passed"] = len(hard_issues) == 0
 
     return report
 
 
-def validate_results(result_paths: list[str]) -> dict[str, Any]:
+def validate_results(
+    result_paths: list[str],
+    contract: ResultContract | None = None,
+) -> dict[str, Any]:
     """验证多个结果文件，返回汇总报告。"""
-    reports = [validate_result(p) for p in result_paths]
+    reports = [validate_result(p, contract=contract) for p in result_paths]
     all_passed = all(r["passed"] for r in reports)
     all_issues = []
+    all_warnings = []
     for r in reports:
         all_issues.extend([f"[{r['path']}] {issue}" for issue in r["issues"]])
+        all_warnings.extend([f"[{r['path']}] {warning}" for warning in r["warnings"]])
 
     return {
         "passed": all_passed,
         "reports": reports,
         "issues": all_issues,
+        "warnings": all_warnings,
     }
 
 
@@ -256,9 +378,37 @@ def result_reviewer_node(
         control.coder_rollback_target = "architect"
         # V9 修复：标记清空 result_paths（虽然此处已为空，但保持一致性）
         artifacts.clear_result_paths = True
-        return {"control": control, "artifacts": artifacts, "empirical": empirical}
+        entry = make_entry(control, "result_reviewer", "result_review_failed",
+                           "ResultReviewer：没有结果文件路径")
+        if runtime is not None:
+            write_log_line(runtime.settings.output_dir, entry)
+        return {
+            "control": control,
+            "artifacts": artifacts,
+            "empirical": empirical,
+            "process_log": [entry],
+        }
 
-    report = validate_results(artifacts.result_paths)
+    # V12 修复：按 Architect 声明的结果契约验证；无契约时保留旧启发式
+    contract = getattr(artifacts, "result_contract", None)
+    # V16 修复：小题循环下 result_paths 累积了全部小题的结果文件（q1.csv、q2.csv...），
+    # 但每个小题的契约只适用于当前小题。这里只校验当前小题的结果文件：
+    # - 小题循环：results/q{current_index+1}.csv
+    # - 单题模式：全部 result_paths（通常只有 output.csv）
+    current_q = (
+        f"q{control.current_sub_question_index + 1}.csv"
+        if control.sub_questions
+        else None
+    )
+    if current_q:
+        paths_to_check = [
+            p for p in artifacts.result_paths if p.endswith(current_q)
+        ]
+        if not paths_to_check:
+            paths_to_check = artifacts.result_paths
+    else:
+        paths_to_check = artifacts.result_paths
+    report = validate_results(paths_to_check, contract=contract)
     if not report["passed"]:
         control.phase = "result_review_failed"
         control.coder_error_count += 1
@@ -279,7 +429,23 @@ def result_reviewer_node(
         artifacts.result_paths = []
         artifacts.clear_result_paths = True
         logger.warning("ResultReviewer 失败：%s", report["issues"])
-        return {"control": control, "artifacts": artifacts, "empirical": empirical}
+        audit = {}
+        if report.get("warnings"):
+            audit["result_reviewer_warnings"] = "\n".join(report["warnings"])
+        entry = make_entry(
+            control, "result_reviewer", "result_review_failed",
+            f"ResultReviewer 拒绝：{len(report['issues'])} 个硬性问题",
+            {"issues": list(report["issues"]), "warnings": list(report.get("warnings") or [])},
+        )
+        if runtime is not None:
+            write_log_line(runtime.settings.output_dir, entry)
+        return {
+            "control": control,
+            "artifacts": artifacts,
+            "empirical": empirical,
+            "prompt_audit": audit,
+            "process_log": [entry],
+        }
 
     # ── 验证通过后做假设检验（机械、零 LLM 成本）──
     control.phase = "result_review_passed"
@@ -318,4 +484,20 @@ def result_reviewer_node(
             )
         logger.info("ResultReviewer 假设检验产出 %d 条发现", len(auto_findings))
 
-    return {"control": control, "artifacts": artifacts, "empirical": empirical}
+    entry = make_entry(
+        control, "result_reviewer", "result_review_passed",
+        f"ResultReviewer 通过：{artifacts.result_paths}",
+        {
+            "result_paths": list(artifacts.result_paths),
+            "auto_findings": len(auto_findings),
+            "trigger_clarifier_revision": control.trigger_clarifier_revision,
+        },
+    )
+    if runtime is not None:
+        write_log_line(runtime.settings.output_dir, entry)
+    return {
+        "control": control,
+        "artifacts": artifacts,
+        "empirical": empirical,
+        "process_log": [entry],
+    }

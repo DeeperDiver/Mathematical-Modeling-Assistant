@@ -26,6 +26,7 @@ from modeling_assistant.schemas.state import (
     DataProfile,
     EmpiricalFinding,
     EmpiricalLayer,
+    FileSummary,
     GraphState,
     StaticLTM,
 )
@@ -268,6 +269,29 @@ def load_data_profile(file_paths: list[str]) -> DataProfile:
         return profile
 
     profile.file_paths = readable_paths
+
+    # V12 修复：保留文件边界的独立画像。
+    # 多附件/异构表格不再只呈现"合并后的大表"，
+    # 每个文件的 rows/cols/columns/issues 单独保留，
+    # prompt 注入时只取紧凑摘要，原始数据不进 prompt。
+    for p in readable_paths:
+        df = _read_file(Path(p))
+        if df is None:
+            continue
+        file_columns = [
+            _compute_column_profile(str(col), df[col])
+            for col in df.columns
+        ]
+        annotate_parse_hints(file_columns)
+        profile.file_summaries.append(
+            FileSummary(
+                path=str(Path(p).resolve()),
+                rows=int(len(df)),
+                cols=int(len(df.columns)),
+                columns=file_columns,
+                issues=_detect_issues(df),
+            )
+        )
 
     # 简单策略：如果只有一个文件，直接用它；多个文件时按列拼接
     if len(frames) == 1:

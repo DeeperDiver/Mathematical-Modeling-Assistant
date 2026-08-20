@@ -8,6 +8,15 @@ dist/
 build/
 *.egg-info/
 outputs*/
+# 过往运行记录归档（显式声明，供后续清理）
+outputs/archive/
+
+# 整理归档与临时工作区
+archive/
+scratch/
+
+# 数模资料库（题目、论文等私有资料，不纳入版本控制）
+CUMCM数模资料/
 
 # IDE / agent 临时目录
 .trae/
@@ -35,6 +44,20 @@ test_write.tmp
 # 实例测试（题目、附件与端到端运行脚本及其输出）
 real_tests/
 
+# 本地测试题与附件（与 real_tests/ 同类，不入库）
+test/
+
 # 优秀论文原文（私有资产，不纳入版本控制；提炼卡片与题型指南保留）
 exemplars/raw/
 exemplars/leave_one_out_report.json
+
+# 平台杂项
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 编辑器临时/备份文件
+*~
+*.swp
+*.swo
+.ipynb_checkpoints/

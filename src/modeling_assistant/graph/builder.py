@@ -13,6 +13,9 @@ from modeling_assistant.agents.nodes import (
     architect_node,
     clarifier_node,
     coder_node,
+    cross_sub_question_hitl_node,
+    data_analyst_node,
+    dispatch_implementation_node,
     drawer_node,
     exemplar_loader_node,
     fact_extractor_node,
@@ -20,6 +23,8 @@ from modeling_assistant.agents.nodes import (
     hitl_arbitration_node,
     hitl_architecture_node,
     hitl_final_node,
+    hitl_implementation_human_node,
+    hitl_implementation_review_node,
     hitl_modeling_node,
     mathematician_node,
     milestone_reviewer_1_node,
@@ -27,20 +32,28 @@ from modeling_assistant.agents.nodes import (
     realist_node,
     reflection_node,
     searcher_node,
+    split_sub_questions_node,
+    sub_question_acceptance_node,
     writer_node,
 )
 from modeling_assistant.data.loader import data_profile_node
 from modeling_assistant.graph.routing import (
+    route_after_architect_external,
     route_after_architecture_hitl,
     route_after_arbiter,
+    route_after_acceptance,
     route_after_coder,
+    route_after_cross_sub_question,
     route_after_final_review,
     route_after_hitl_modeling,
+    route_after_implementation_human,
+    route_after_implementation_review,
     route_after_milestone_reviewer_1,
     route_after_realist,
     route_after_reflection,
     route_after_result_reviewer,
     route_after_rollback,
+    route_after_split,
 )
 from modeling_assistant.memory.archive import checkout_snapshot
 from modeling_assistant.schemas.state import ControlState, GraphState
@@ -114,8 +127,12 @@ def build_graph(runtime: AgentRuntime | None = None, *, checkpointer: InMemorySa
     graph.add_node("problem", _bind_runtime(problem_node, resolved_runtime))
     # V11 修复：插入 fact_extractor_node（纯机器提取题目常量），在 analyst 之前运行
     graph.add_node("fact_extractor", _bind_runtime(fact_extractor_node, resolved_runtime))
+    # V14 小题循环：自动拆分 + HITL 确认后再进入全局分析
+    graph.add_node("split_sub_questions", _bind_runtime(split_sub_questions_node, resolved_runtime))
     graph.add_node("analyst", _bind_runtime(analyst_node, resolved_runtime))
     graph.add_node("data_profile", _bind_runtime(data_profile_node, resolved_runtime))
+    # V12 新增：数据理解分析师 —— 从紧凑画像提炼"解题所需信息"，原始数据不进 prompt
+    graph.add_node("data_analyst", _bind_runtime(data_analyst_node, resolved_runtime))
     graph.add_node("searcher", _bind_runtime(searcher_node, resolved_runtime))
     graph.add_node("exemplar_loader", _bind_runtime(exemplar_loader_node, resolved_runtime))
     graph.add_node("mathematician", _bind_runtime(mathematician_node, resolved_runtime))
@@ -126,11 +143,18 @@ def build_graph(runtime: AgentRuntime | None = None, *, checkpointer: InMemorySa
     graph.add_node("clarifier", _bind_runtime(clarifier_node, resolved_runtime))
     graph.add_node("milestone_reviewer_1", _bind_runtime(milestone_reviewer_1_node, resolved_runtime))
     graph.add_node("hitl_architecture", _bind_runtime(hitl_architecture_node, resolved_runtime))
+    # V13 编程手模式：实现架构人工审核 + 任务包分发 + 等待人工交付
+    graph.add_node("hitl_implementation_review", _bind_runtime(hitl_implementation_review_node, resolved_runtime))
+    graph.add_node("dispatch_implementation", _bind_runtime(dispatch_implementation_node, resolved_runtime))
+    graph.add_node("hitl_implementation_human", _bind_runtime(hitl_implementation_human_node, resolved_runtime))
     graph.add_node("rollback", rollback_node)
     graph.add_node("architect", _bind_runtime(architect_node, resolved_runtime))
     graph.add_node("drawer", _bind_runtime(drawer_node, resolved_runtime))
     graph.add_node("coder", _bind_runtime(coder_node, resolved_runtime))
     graph.add_node("result_reviewer", _bind_runtime(result_reviewer_node, resolved_runtime))
+    # V14 小题循环：机械校验通过后进入人工验收闸门
+    graph.add_node("sub_question_acceptance", _bind_runtime(sub_question_acceptance_node, resolved_runtime))
+    graph.add_node("cross_sub_question_hitl", _bind_runtime(cross_sub_question_hitl_node, resolved_runtime))
     graph.add_node("reflection", _bind_runtime(reflection_node, resolved_runtime))
     graph.add_node("collect_artifacts", collect_artifacts_node)
     graph.add_node("writer", _bind_runtime(writer_node, resolved_runtime))
@@ -140,9 +164,15 @@ def build_graph(runtime: AgentRuntime | None = None, *, checkpointer: InMemorySa
     graph.add_edge(START, "problem")
     # V11 修复：problem → fact_extractor → analyst，确保 Analyst 能看到机器提取的常量
     graph.add_edge("problem", "fact_extractor")
-    graph.add_edge("fact_extractor", "analyst")
+    graph.add_edge("fact_extractor", "split_sub_questions")
+    graph.add_conditional_edges(
+        "split_sub_questions",
+        route_after_split,
+        {"analyst": "analyst", "split_sub_questions": "split_sub_questions"},
+    )
     graph.add_edge("analyst", "data_profile")
-    graph.add_edge("data_profile", "searcher")
+    graph.add_edge("data_profile", "data_analyst")
+    graph.add_edge("data_analyst", "searcher")
     # Exemplar Learning System：检索优秀论文表达知识后再进入建模阶段
     graph.add_edge("searcher", "exemplar_loader")
     graph.add_edge("exemplar_loader", "mathematician")
@@ -182,8 +212,39 @@ def build_graph(runtime: AgentRuntime | None = None, *, checkpointer: InMemorySa
         route_after_rollback,
         {"architect": "architect", "mathematician": "mathematician"},
     )
-    graph.add_edge("architect", "drawer")
-    graph.add_edge("architect", "coder")
+    # V13 修复：外部编程手模式（codex / human）下，Architect 之后先做
+    # 实现架构人类审核 → 分发任务包 →（human 模式等待人工交付）→ Coder；
+    # builtin 模式保持原有 drawer + coder 并行。
+    if resolved_runtime.settings.coder_external_mode in ("codex", "human"):
+        graph.add_conditional_edges(
+            "architect",
+            route_after_architect_external,
+            {
+                "hitl_implementation_review": "hitl_implementation_review",
+                "dispatch_implementation": "dispatch_implementation",
+            },
+        )
+        graph.add_conditional_edges(
+            "hitl_implementation_review",
+            route_after_implementation_review,
+            {
+                "dispatch_implementation": "dispatch_implementation",
+                "architect": "architect",
+                "rollback": "rollback",
+            },
+        )
+        if resolved_runtime.settings.coder_external_mode == "human":
+            graph.add_edge("dispatch_implementation", "hitl_implementation_human")
+            graph.add_conditional_edges(
+                "hitl_implementation_human",
+                route_after_implementation_human,
+                {"coder": "coder", "architect": "architect"},
+            )
+        else:
+            graph.add_edge("dispatch_implementation", "coder")
+    else:
+        graph.add_edge("architect", "drawer")
+        graph.add_edge("architect", "coder")
     # V5 修复：移除 drawer → collect_artifacts 边。
     # 原设计 collect_artifacts 是 fan-in 节点（drawer + reflection），但当
     # result_reviewer 失败回退（不经过 reflection）时，LangGraph 的 fan-in 语义
@@ -201,11 +262,32 @@ def build_graph(runtime: AgentRuntime | None = None, *, checkpointer: InMemorySa
             "reflection": "reflection",
         },
     )
-    # ResultReviewer 通过 → reflection（提取实证发现）；失败 → 回退
+    # ResultReviewer 通过 → 小题人工验收；失败 → reflection 消费预算并带回反馈
     graph.add_conditional_edges(
         "result_reviewer",
         route_after_result_reviewer,
-        {"reflection": "reflection", "architect": "architect", "clarifier": "clarifier"},
+        {
+            "reflection": "reflection",
+            "sub_question_acceptance": "sub_question_acceptance",
+        },
+    )
+    # V14 小题验收闸门：pass → 下一小题/Writer；fail → 对应层级；cross → 跨小题 HITL
+    graph.add_conditional_edges(
+        "sub_question_acceptance",
+        route_after_acceptance,
+        {
+            "mathematician": "mathematician",
+            "architect": "architect",
+            "hitl_implementation_human": "hitl_implementation_human",
+            "cross_sub_question_hitl": "cross_sub_question_hitl",
+            "hitl_modeling": "hitl_modeling",
+            "collect_artifacts": "collect_artifacts",
+        },
+    )
+    graph.add_conditional_edges(
+        "cross_sub_question_hitl",
+        route_after_cross_sub_question,
+        {"mathematician": "mathematician", "collect_artifacts": "collect_artifacts"},
     )
     # Reflection 后：Meta-Router 决策优先（mathematician/clarifier/architect/collect_artifacts）；
     # V6 修复：coder 失败（result_paths 空）+ budget 未耗尽 → 回 architect 重试
@@ -238,7 +320,7 @@ def build_graph(runtime: AgentRuntime | None = None, *, checkpointer: InMemorySa
     graph.add_conditional_edges(
         "hitl_final",
         route_after_final_review,
-        {"rollback": "rollback", "hitl_final": END},
+        {"rollback": "rollback", "hitl_final": END, "writer": "writer"},
     )
 
     return graph.compile(checkpointer=checkpointer or InMemorySaver())

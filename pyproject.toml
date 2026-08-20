@@ -37,7 +37,7 @@ modeling-assistant = "modeling_assistant.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-modeling_assistant = ["prompts/templates/*.md"]
+modeling_assistant = ["prompts/templates/*.md", "references/*.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

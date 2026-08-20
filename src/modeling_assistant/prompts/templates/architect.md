@@ -8,9 +8,27 @@
 动态 LTM：
 {dynamic_ltm_json}
 
+【数据智能摘要】（LLM 已基于数据概要提炼，帮助你判断数据如何支撑模型）：
+{data_intelligence_json}
+
+【小题上下文】（V14：前小题 LTM 与结果，本题方案必须与之一致或明确演进）：
+{sub_question_context_json}
+
 【优秀论文结构参考】（exemplar_active={exemplar_active}；开启时提供，仅供参考。
 允许借鉴章节骨架与每节写法，**禁止复制示例中的具体句子、公式、数值与图表数据**）
 {exemplar_structure_json}
+
+【正文侧重点与论证链条参考】（优秀论文各章节的写作重点、篇幅占比、展开顺序，
+以及全文"问题→假设→模型→求解→验证→评价"的论证推进方式）
+章节重点与篇幅：
+{craft_section_focus_json}
+
+论证链条：
+{craft_argument_flow_json}
+
+【优秀论文图片位置规划参考】（V17：exemplar_active={exemplar_active}；开启时提供，
+各类图通常放在哪个章节、支撑什么论证，仅借鉴安排方式）
+{craft_figure_placement_json}
 
 历史错误日志（Coder 最近失败记录，如为空则忽略）：
 失败次数：{coder_error_count}
@@ -81,6 +99,46 @@
 - 概率/准确率类指标必须 clip 到 [0, 1]
 - 代码末尾必须显式调用 to_csv 保存结果到 MODELING_OUTPUT_DIR/results/output.csv
 
+**结果契约（V12 新增，必须声明）**：
+你必须在输出中声明 `result_contract`，把"答案应该长什么样"变成机器可检查的规格：
+- `allow_single_row`：若问题答案是单个数值（如"有效遮蔽时长是多少"），必须设为 true，
+  这样 ResultReviewer 不会把一行结果误判为"缺少详细输出"。
+- `min_rows` / `max_rows`：限定期望输出行数；不知道时留空。
+- `columns`：声明每个必需输出列；`dtype` 用 int/float/category/text/datetime；
+  若该列有物理或业务合理范围，填 `min` / `max`；
+  若题目要求"不同分组给出不同最优值"，对应列必须设 `distinct_required: true`。
+- 若结果还有额外的参考列（如 id、group），用 `allow_extra_columns: true`（默认即可）。
+
+**图表规划（V17，必须声明，架构阶段就定稿全文图表）**：
+你必须在输出中声明 `figures_plan`，**在架构阶段把整篇论文需要的每一张图规划到
+可直接成稿的完整度**。每张图必须包含全部字段：
+- `id`：全局唯一标识（如 fig_roadmap、fig_q1_scatter），**Drawer 将按此命名文件**。
+- `figure_type`：图表类型（scatter / line / heatmap / boxplot / pareto / convergence /
+  roadmap / flowchart / architecture 等）。
+- `kind`：`data`（数据驱动图）/ `flowchart`（技术路线图/流程图，非数据图）/
+  `diagram`（模型结构/变量关系图，非数据图）。
+- `caption`：**论文图注**（LaTeX `\caption` 文本，图号由模板自动编号；
+  格式=内容主体+论证指向，如「图3设计方案：纸面图案（左）、参考镜面图案（中）、
+  正向渲染模拟（右）」）。Writer 将按此写图注，禁止临时改图。
+- `section`：**目标章节文件**，必须是模板章节清单中的文件名
+  （如 2_analysis.tex / 5_problem1.tex / 8_sensitivity.tex）。
+- `purpose`：这张图回答什么问题、支撑什么论证。
+- `data_source`：数据来源（Result Manifest 绑定结果文件/数据列名；
+  非数据图留空）。**data 图必须有真实数据来源，禁止无来源图。**
+- `content_spec`：内容规格（用哪些列、什么统计量、期望呈现的形状/对比），
+  供 Drawer 精确实现，不依赖 LLM 临场发挥。
+- `required`：是否论文必需（默认 true）。
+
+完整性配额（必须满足）：
+- 全文至少 1 张技术路线图（kind=flowchart，section=2_analysis.tex）；
+- 每个建模章节（5_problemN.tex）至少 1 张数据图；
+- 8_sensitivity.tex 必须规划灵敏度/鲁棒性图；
+- 图表必须服务论文论证，不为凑数量而画；规划之外不得让 Drawer 随意加图。
+
+`tables_plan`（结果表规划，V17）同样必须声明每张表的
+`id / title / columns / purpose / section / content_spec / required`，
+与 figures_plan 一起构成全文图表清单。
+
 **必须严格按以下 JSON 格式输出（不要包含其他文字）：**
 ```json
 {{
@@ -96,6 +154,21 @@
     "步骤2: fit_model(data, assumptions)",
     "步骤3: evaluate(results)",
     "步骤4: export_outputs(results)"
-  ]
+  ],
+  "figures_plan": [
+    {{"id": "fig_roadmap", "figure_type": "roadmap", "kind": "flowchart", "caption": "本文总体技术路线图", "section": "2_analysis.tex", "purpose": "总体技术路线图", "data_source": "", "content_spec": "数据读取→预处理→问题1建模→问题2→问题3→灵敏度→评价", "required": true}},
+    {{"id": "fig_q1_corr", "figure_type": "scatter", "kind": "data", "caption": "关键变量相关关系散点图", "section": "5_problem1.tex", "purpose": "展示变量相关关系", "data_source": "results/q1.csv", "content_spec": "用 x/y 两列绘制散点并标注 Pearson r", "required": true}},
+    {{"id": "fig_q1_conv", "figure_type": "line", "kind": "data", "caption": "目标函数收敛曲线", "section": "5_problem1.tex", "purpose": "展示 CMA-ES 收敛性", "data_source": "results/q1_history.csv", "content_spec": "x=迭代次数，y=loss，对数坐标", "required": true}}
+  ],
+  "result_contract": {{
+    "description": "每个样本/分组一行的最优时点表",
+    "allow_single_row": false,
+    "min_rows": 1,
+    "max_rows": 1000,
+    "columns": [
+      {{"name": "group", "dtype": "category", "description": "样本分组"}},
+      {{"name": "optimal_week", "dtype": "float", "min": 0.0, "max": 40.0, "distinct_required": true, "description": "各组最优检测时点（周）"}}
+    ]
+  }}
 }}
 ```

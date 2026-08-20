@@ -11,6 +11,7 @@ import json
 import logging
 import re
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from pathlib import Path
 from typing import Any
 
@@ -33,10 +34,19 @@ _TYPE_KEYWORDS: dict[str, tuple[str, ...]] = {
 
 
 def extract_text(path: str | Path) -> str:
-    """按扩展名提取论文文本；PDF 依赖 pdfplumber，缺失时抛出 ImportError。"""
+    """按扩展名提取论文文本。
+
+    PDF 优先读取同目录 <name>.pdf.ocr.txt 缓存（扫描件 OCR 结果）；
+    无缓存时依赖 pdfplumber，缺失时抛出 ImportError。
+    """
     path = Path(path)
     suffix = path.suffix.lower()
     if suffix == ".pdf":
+        ocr_cache = path.with_suffix(path.suffix + ".ocr.txt")
+        if ocr_cache.exists():
+            cached = ocr_cache.read_text(encoding="utf-8", errors="replace")
+            if len(cached.strip()) > 200:
+                return cached
         try:
             import pdfplumber
         except ImportError as exc:
@@ -168,23 +178,41 @@ def _llm_ingest(
     system_prompt = template.format(
         raw_problem=problem_text or "（未提供题面）",
         paper_title=path.stem,
-        paper_text=paper_text[:12000],
+        paper_text=paper_text[:20000],
         problem_type=problem_type,
         contest=contest,
     )
-    try:
-        raw = runtime.invoke("exemplar_ingest", {}, system_prompt=system_prompt)
-        from modeling_assistant.agents.runtime import _extract_json
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        pool = ThreadPoolExecutor(max_workers=1)
+        future = pool.submit(
+            runtime.invoke, "exemplar_ingest", {}, system_prompt
+        )
+        try:
+            # 单次调用限时：DeepSeek 偶发挂起，快速失败进入重试/fallback
+            raw = future.result(timeout=120)
+            from modeling_assistant.agents.runtime import _extract_json
 
-        data = json.loads(_extract_json(raw))
-        data.setdefault("id", path.stem)
-        data.setdefault("source_path", str(path))
-        data.setdefault("problem_type", problem_type)
-        data.setdefault("contest", contest)
-        return ExemplarPaper.model_validate(data)
-    except Exception as exc:
-        logger.warning("LLM 卡片提炼失败 %s: %s", path, exc)
-        return None
+            data = json.loads(_extract_json(raw))
+            # id 由文件名决定，保证唯一性与摄入幂等（可断点续传）
+            data["id"] = path.stem
+            data.setdefault("source_path", str(path))
+            data.setdefault("problem_type", problem_type)
+            data.setdefault("contest", contest)
+            return ExemplarPaper.model_validate(data)
+        except Exception as exc:
+            last_exc = exc
+            if isinstance(exc, FutureTimeout):
+                exc = TimeoutError("LLM 提炼超时（120s）")
+            logger.warning(
+                "LLM 卡片提炼失败 %s（attempt %d/3）: %s", path, attempt + 1, exc
+            )
+        finally:
+            # 不等待后台线程（httpx 300s 超时仍在跑），避免 with 阻塞
+            future.cancel()
+            pool.shutdown(wait=False, cancel_futures=True)
+    logger.warning("LLM 卡片提炼最终失败 %s: %s", path, last_exc)
+    return None
 
 
 def aggregate_guides(
@@ -221,7 +249,9 @@ def _deterministic_aggregate(
     n = len(group)
     structure_counter: Counter[str] = Counter()
     for card in group:
-        structure_counter.update(card.structure.keys())
+        structure_counter.update(
+            n for n in (_normalize_section_name(s) for s in card.structure.keys()) if n
+        )
     figure_counter: Counter[str] = Counter()
     for card in group:
         figure_counter.update(f.figure_type for f in card.figures)
@@ -229,9 +259,11 @@ def _deterministic_aggregate(
     for card in group:
         pitfall_counter.update(card.pitfalls)
 
-    common_structure = [s for s, c in structure_counter.items() if c >= min_occurrences]
-    variants = [s for s, c in structure_counter.items() if 0 < c < min_occurrences]
-    recommended_figures = [f for f, c in figure_counter.items() if c >= min_occurrences]
+    # 动态阈值：组越大要求越高，防止大组把偶然出现的章节当共性
+    threshold = max(min_occurrences, round(n * 0.2))
+    common_structure = [s for s, c in structure_counter.items() if c >= threshold]
+    variants = [s for s, c in structure_counter.items() if 2 <= c < threshold]
+    recommended_figures = [f for f, c in figure_counter.items() if c >= threshold]
     common_pitfalls = [p for p, c in pitfall_counter.items() if c >= max(2, min_occurrences - 1)]
 
     # 文风基线：同一键下最常见取值，且出现次数 >= max(2, min-1)
@@ -258,6 +290,41 @@ def _deterministic_aggregate(
         exemplar_ids=[c.id for c in group],
         quality_score=round(sum(c.quality_score for c in group) / n, 3) if n else 0.5,
     )
+
+
+def _normalize_section_name(name: str) -> str:
+    """归一化章节名：消除论文间命名差异（"模型的建立"→"模型建立"等），
+    使指南共性统计更准确、更可泛化。"""
+    s = re.sub(r"[\s\u3000]+", "", name or "")
+    if not s:
+        return name or ""
+    # 先去掉"的"等虚字，保证"模型的建立"能命中"模型建立"
+    s = s.replace("的", "")
+    canonical = {
+        "摘要": "摘要",
+        "问题重述": "问题重述",
+        "问题分析": "问题分析",
+        "模型假设": "模型假设",
+        "符号说明": "符号说明",
+        "模型建立": "模型建立",
+        "模型求解": "模型求解",
+        "模型检验": "模型检验",
+        "灵敏度分析": "灵敏度分析",
+        "结果分析": "结果分析",
+        "模型评价": "模型评价",
+        "模型推广": "模型推广",
+    }
+    for key in sorted(canonical, key=len, reverse=True):
+        if key in s:
+            return canonical[key]
+    # 去掉"模型一/问题1"等编号前缀与括号尾注
+    s = re.sub(
+        r"^(模型[一二三四五六七八九十]+|问题[一二三四五六七八九十\d]+|第[一二三四五六七八九十\d]+[题问节])",
+        "",
+        s,
+    )
+    s = re.sub(r"[（(][^）)]*[)）]$", "", s)
+    return s if len(s) >= 2 else ""
 
 
 def _llm_aggregate_group(
@@ -291,8 +358,12 @@ def _llm_aggregate_group(
         contest=contest or "（未指定）",
         cards_json=cards_json,
     )
+    pool = ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(
+        runtime.invoke, "exemplar_aggregate", {}, system_prompt
+    )
     try:
-        raw = runtime.invoke("exemplar_aggregate", {}, system_prompt=system_prompt)
+        raw = future.result(timeout=90)
         from modeling_assistant.agents.runtime import _extract_json
 
         data = json.loads(_extract_json(raw))
@@ -303,3 +374,6 @@ def _llm_aggregate_group(
     except Exception as exc:
         logger.warning("LLM 题型聚合失败 %s/%s: %s", problem_type, contest, exc)
         return None
+    finally:
+        future.cancel()
+        pool.shutdown(wait=False, cancel_futures=True)

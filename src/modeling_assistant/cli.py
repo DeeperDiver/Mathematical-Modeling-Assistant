@@ -57,6 +57,17 @@ def _print_interrupt_info(interrupt_data: dict) -> None:
             print(f"  Meta决策: {ctrl.get('meta_decision', 'N/A')}")
             print(f"  方向提示: {ctrl.get('meta_direction_hint', 'N/A')}")
 
+    if "paper_review_report" in interrupt_data:
+        report = interrupt_data["paper_review_report"] or {}
+        print(f"  确定性验收: {'通过' if report.get('passed') else '未通过'}")
+        for issue in (report.get("issues") or [])[:5]:
+            print(f"    [硬错误] {issue[:120]}")
+        llm = report.get("llm") or {}
+        if llm:
+            print(f"  LLM 审查: {llm.get('verdict', 'N/A')} — {llm.get('summary', '')[:120]}")
+            for issue in (llm.get("issues") or [])[:5]:
+                print(f"    [审查] {issue[:120]}")
+
     print("-" * 60)
 
 
@@ -86,8 +97,14 @@ def _collect_attachment_paths(paths: list[str]) -> list[str]:
 
 
 def main() -> None:
+    # V16 修复：配置根日志，让长流程的 LLM 调用/阶段切换可观测
+    # （runtime 已用 logger.info 记录每次调用与返回字符数，缺 basicConfig 时不输出）
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    )
     parser = argparse.ArgumentParser(description="Run the Modeling Assistant graph skeleton.")
-    parser.add_argument("--problem", required=True, help="Raw mathematical modeling problem text.")
+    parser.add_argument("--problem", required=False, help="Raw mathematical modeling problem text.")
     parser.add_argument(
         "--data-attachment",
         action="append",
@@ -104,8 +121,32 @@ def main() -> None:
         default=None,
         help="Override MODELING_ASSISTANT_EXEMPLARS_DIR (优秀论文知识库目录).",
     )
+    parser.add_argument(
+        "--coder-external-mode",
+        choices=["builtin", "codex", "human"],
+        default=None,
+        help=(
+            "编程手模式：builtin=内置 Coder；codex=调用本机 Codex CLI；"
+            "human=人工编程手（架构经人类审核后，人编写 solution.py）。"
+        ),
+    )
     parser.add_argument("--auto-approve", action="store_true", help="Auto-approve all HITL checkpoints (no pause).")
+    parser.add_argument(
+        "--doctor",
+        action="store_true",
+        help="运行环境健康检查后退出（依赖、编译器、API Key）。",
+    )
     args = parser.parse_args()
+
+    if args.doctor:
+        from modeling_assistant.doctor import print_report, run_doctor
+
+        report = run_doctor()
+        print_report(report)
+        sys.exit(0 if report.ready else 1)
+
+    if not args.problem:
+        parser.error("--problem 是必填参数（--doctor 模式除外）。")
 
     overrides = {}
     if args.llm_model:
@@ -116,6 +157,8 @@ def main() -> None:
         overrides["output_dir"] = Path(args.output_dir)
     if args.exemplars_dir:
         overrides["exemplars_dir"] = Path(args.exemplars_dir)
+    if args.coder_external_mode:
+        overrides["coder_external_mode"] = args.coder_external_mode
     settings = load_settings(args.env_file, **overrides)
     runtime = AgentRuntime.from_settings(settings)
     app = build_graph(runtime=runtime)
@@ -141,79 +184,70 @@ def main() -> None:
         result = app.invoke(current_input, config)
         control = result.get("control", ControlState())
 
-        if not control.hitl_required:
+        # LangGraph 在节点中断时，invoke 返回的是"中断前"的 state，
+        # 因此不能依赖节点内设置的 control.hitl_required 判断暂停；
+        # 必须检查 __interrupt__ 载荷（stage/message/hint 都在里面）。
+        interrupts = result.get("__interrupt__")
+        if not interrupts:
             final_state = result
             break
 
+        interrupt_value = (
+            interrupts[0].value if hasattr(interrupts[0], "value") else interrupts[0]
+        )
+        stage = (
+            interrupt_value.get("stage")
+            if isinstance(interrupt_value, dict)
+            else str(interrupt_value)
+        )
+
         if args.auto_approve:
-            logger.info("auto-approve: 跳过 HITL 中断，自动放行。")
-            current_input = Command(resume="approve")
+            logger.info("auto-approve: 跳过 HITL 中断（%s），自动放行。", stage)
+            if stage == "implementation_human":
+                resume = "auto"
+            elif stage == "sub_question_acceptance":
+                resume = "pass"
+            elif stage == "cross_sub_question":
+                resume = "accept"
+            else:
+                resume = "approve"
+            current_input = Command(resume=resume)
             continue
 
-        # 显示中断信息
-        if control.hitl_stage == "architecture":
-            _print_interrupt_info({
-                "stage": "architecture",
-                "message": "请审核当前建模方案。",
-                "hint": "输入 'approve' 放行进入架构设计，或 'rollback <version>' 回滚到指定版本。",
-                "dynamic_ltm": result.get("dynamic_ltm", DynamicLTM()).model_dump(),
-                "control_summary": {
-                    "phase": control.phase,
-                    "selected_plan_id": control.selected_plan_id,
-                    "innovation_score": control.innovation_score,
-                    "feasibility_score": control.feasibility_score,
-                },
-            })
-        elif control.hitl_stage == "final":
-            _print_interrupt_info({
-                "stage": "final",
-                "message": "请审核最终论文。",
-                "hint": "输入 'approve' 完成流程，或 'retry' 回到建模阶段重新打磨。",
-                "artifacts_summary": result.get("artifacts", ArtifactBundle()).model_dump(),
-            })
-        elif control.hitl_stage == "arbitration":
-            _print_interrupt_info({
-                "stage": "arbitration",
-                "message": f"Arbiter 建议回滚到版本 {control.rollback_to_version}。",
-                "hint": "输入 'approve' 接受回滚，或 'reject' 拒绝回滚继续进入 Clarifier。",
-                "control_summary": {
-                    "phase": control.phase,
-                    "debate_round": control.debate_round,
-                    "selected_plan_id": control.selected_plan_id,
-                    "innovation_score": control.innovation_score,
-                    "feasibility_score": control.feasibility_score,
-                },
-            })
-        elif control.hitl_stage == "modeling":
-            artifacts = result.get("artifacts", ArtifactBundle())
-            _print_interrupt_info({
-                "stage": "modeling",
-                "message": (
-                    f"建模预算已耗尽（{control.modeling_revision_count}/{control.modeling_revision_budget}）。"
-                    "系统多次尝试未能产出通过验证的结果，请人类决断下一步。"
-                ),
-                "hint": (
-                    "输入 'accept' 接受失败并产出'待验证'论文；"
-                    "输入 'retry' 重置预算并回到 Architect 重试当前方案；"
-                    "输入 'redirect <方向提示>' 重置预算并回到 Mathematician 重新发散。"
-                ),
-                "control_summary": {
-                    "phase": control.phase,
-                    "budget_used": control.modeling_revision_count,
-                    "budget_limit": control.modeling_revision_budget,
-                    "selected_plan_id": control.selected_plan_id,
-                    "meta_decision": control.meta_decision,
-                    "meta_direction_hint": control.meta_direction_hint,
-                },
-                "artifacts_summary": {
-                    "result_paths": getattr(artifacts, "result_paths", []),
-                    "has_backup_results": bool(getattr(artifacts, "result_paths", None)),
-                },
-            })
-        else:
-            logger.info("未知 HITL 阶段: %s，自动放行。", control.hitl_stage)
-            current_input = Command(resume="approve")
-            continue
+        # 显示中断信息：stage/message/hint 都来自节点 interrupt 载荷
+        _print_interrupt_info(interrupt_value)
+        if stage == "implementation_architecture":
+            spec_md = interrupt_value.get("architecture_spec_md", "") or ""
+            if spec_md:
+                print("\n" + spec_md[:4000])
+                print("-" * 60)
+        elif stage == "implementation_human":
+            print(f"  任务目录: {interrupt_value.get('task_dir', '')}")
+            print("-" * 60)
+        elif stage == "sub_question_split":
+            print("  小题清单：")
+            for i, q in enumerate(interrupt_value.get("sub_questions", []), start=1):
+                print(f"    {i}. {q[:200]}")
+            print("-" * 60)
+        elif stage == "sub_question_acceptance":
+            print(f"  当前小题: {interrupt_value.get('sub_question_text', '')[:300]}")
+            print(f"  结果文件: {interrupt_value.get('result_paths', [])}")
+            print(f"  图表: {interrupt_value.get('figure_paths', [])}")
+            preview = interrupt_value.get("result_preview", "")
+            if preview:
+                print("\n  结果预览：\n" + preview[:2000])
+            warnings = interrupt_value.get("review_warnings", "")
+            if warnings:
+                print("\n  机械校验提示：\n" + warnings[:1000])
+            print("-" * 60)
+        elif stage == "cross_sub_question":
+            print(
+                f"  目标小题: {interrupt_value.get('target_index', -1) + 1}"
+                if interrupt_value.get("target_index", -1) >= 0
+                else "  目标小题: 未知"
+            )
+            print(f"  可用快照: {interrupt_value.get('archive_versions', [])}")
+            print("-" * 60)
 
         decision = _get_user_decision()
         current_input = Command(resume=decision)
@@ -225,8 +259,55 @@ def main() -> None:
         "objective": final_state["dynamic_ltm"].objective,
         "artifacts": final_state["artifacts"].model_dump(),
         "prompt_audit_keys": sorted(final_state.get("prompt_audit", {}).keys()),
+        "process_log_count": len(final_state.get("process_log", []) or []),
     }
+    # V17：token usage 汇总（runtime 每次调用已落盘 usage.jsonl）
+    usage_summary: dict | None = None
+    try:
+        from modeling_assistant.recording.process_log import summarize_usage
+
+        usage_summary = summarize_usage(runtime.usage_log)
+        summary["usage"] = usage_summary
+    except Exception as exc:
+        logger.warning("usage 汇总失败: %s", exc)
     print("\n" + json.dumps(summary, ensure_ascii=False, indent=2))
+
+    # V17：生成运行过程报告（含建模阶段详细，供重新评估方案）
+    try:
+        from modeling_assistant.recording.process_log import write_process_report
+
+        meta = {
+            "问题": (args.problem or "")[:150],
+            "LLM 模型": settings.llm_model,
+            "输出目录": str(settings.output_dir),
+            "结束阶段": final_state["control"].phase,
+            "LLM 调用次数": str(usage_summary["calls"]) if usage_summary else "N/A",
+            "输入 tokens": str(usage_summary["prompt_tokens"]) if usage_summary else "N/A",
+            "输出 tokens": str(usage_summary["completion_tokens"]) if usage_summary else "N/A",
+            "缓存命中": (
+                f"{usage_summary['cache_hit_tokens']} / {usage_summary['prompt_tokens']}"
+                f"（命中率 {usage_summary['cache_hit_rate']:.1%}）"
+                if usage_summary
+                else "N/A"
+            ),
+            "输出 top 节点": (
+                "、".join(
+                    f"{t['node']} {t['completion_tokens']}"
+                    for t in usage_summary["top_nodes_by_completion"]
+                )
+                if usage_summary
+                else "N/A"
+            ),
+        }
+
+        report_path = write_process_report(
+            settings.output_dir,
+            final_state.get("process_log") or [],
+            meta=meta,
+        )
+        print(f"\n运行过程报告: {report_path}")
+    except Exception as exc:
+        logger.warning("运行过程报告生成失败: %s", exc)
 
 
 if __name__ == "__main__":

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from modeling_assistant.config.settings import AppSettings
+from modeling_assistant.data.craft_aggregate import load_craft_guides
 from modeling_assistant.data.exemplars import load_cards, load_guides, load_global_profile
 from modeling_assistant.schemas.state import (
     ExemplarContext,
@@ -81,7 +82,12 @@ def _llm_judge(problem_text: str, runtime: Any) -> str | None:
 
 
 def _card_text(card: ExemplarPaper) -> str:
-    """卡片检索文本：标题 + 结构 + 亮点 + 标签 + 文风，全部为表达特征。"""
+    """卡片检索文本：表达特征 + 论文原文片段。
+
+    表达特征（章节/图表/文风）负责题型层面的匹配；原文片段（优先 OCR 缓存，
+    否则 tex/md/txt 直读）负责与当前题面的主题相关性匹配，避免"题型命中但
+    词汇完全不重合"导致误判不相关。
+    """
     parts = [
         card.title,
         card.problem_type,
@@ -91,6 +97,21 @@ def _card_text(card: ExemplarPaper) -> str:
         " ".join(card.tags),
         " ".join(f"{k}:{v}" for k, v in card.writing_style.items()),
     ]
+    # 原文片段（前 3000 字符）：OCR 缓存 > 纯文本源码 > PDF 提取（仅当无缓存时）
+    source = card.source_path
+    if source:
+        src_path = Path(source)
+        ocr_cache = src_path.with_suffix(src_path.suffix + ".ocr.txt")
+        snippet = ""
+        if ocr_cache.exists():
+            snippet = ocr_cache.read_text(encoding="utf-8", errors="replace")
+        elif src_path.suffix.lower() in (".tex", ".md", ".txt"):
+            try:
+                snippet = src_path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                snippet = ""
+        if snippet:
+            parts.append(snippet[:3000])
     return " ".join(p for p in parts if p)
 
 
@@ -142,6 +163,7 @@ def search_exemplars(
     profile = load_global_profile(exemplars_dir / "profile.yaml")
     cards = load_cards(exemplars_dir / "cards")
     guides = load_guides(exemplars_dir / "guides")
+    craft_guides = load_craft_guides(exemplars_dir / "craft_guides")
     if not cards and not guides:
         # L3 全局偏好独立于知识库命中，始终可作为最上层软约束注入
         if _profile_nonempty(profile):
@@ -170,22 +192,43 @@ def search_exemplars(
     )
 
     relevance = max(max(sims), max(overlaps)) if sims else 0.0
+    # 题型命中即注入：优秀论文库按题型组织，同题型的结构/图表/文风参考
+    # 对当前题目都有价值。主题相关性（原文片段重合）只用于排序选择 Top-K，
+    # 低于阈值时记录提示，不阻断注入（表达特征与题面字面重合天然偏低）。
     if relevance < settings.exemplar_min_relevance:
         logger.info(
-            "Exemplar 相关性 %.3f 低于阈值 %.3f，关闭注入（题型=%s）",
+            "Exemplar 主题相关性 %.3f 低于阈值 %.3f，按题型注入兜底（题型=%s）",
             relevance,
             settings.exemplar_min_relevance,
             problem_type,
         )
-        return ExemplarContext()
 
-    top = [c for c, _sim, _boost in scored[: settings.exemplar_top_k]]
+    # 注入多样性：同一题号（YYYY_T）的论文风格相近，优先保证不同题号，
+    # 避免 top-k 全是同一道题的多篇获奖论文造成风格扎堆（防过拟合）。
+    best_by_topic: dict[str, tuple[float, ExemplarPaper]] = {}
+    for c, sim, boost in scored:
+        topic = _topic_of(c)
+        s = sim * boost + 0.2 * c.quality_score  # 质量权重辅助排序
+        if topic not in best_by_topic or s > best_by_topic[topic][0]:
+            best_by_topic[topic] = (s, c)
+    ordered = sorted(best_by_topic.values(), key=lambda x: x[0], reverse=True)
+    top = [c for _s, c in ordered[: settings.exemplar_top_k]]
+    if len(top) < settings.exemplar_top_k:
+        seen = {c.id for c in top}
+        for c, sim, boost in scored:
+            if len(top) >= settings.exemplar_top_k:
+                break
+            if c.id not in seen:
+                top.append(c)
+                seen.add(c.id)
     guide = _pick_guide(guides, problem_type, contest)
+    craft = next((g for g in craft_guides if g.problem_type == problem_type), None)
     context = ExemplarContext(
         active=True,
         guide=guide,
         cards=top,
         profile=profile,
+        craft=craft,
         injection={k: v > 0 for k, v in settings.style_injection.items()},
     )
     logger.info(
@@ -197,6 +240,14 @@ def search_exemplars(
         "有" if profile.notes or profile.figure_preferences or profile.color_palette else "无",
     )
     return context
+
+
+def _topic_of(card: ExemplarPaper) -> str:
+    """从卡片 id 提取题号分组键（如 2025_B_B060 → 2025_B）。"""
+    parts = card.id.split("_")
+    if len(parts) >= 2 and parts[0].isdigit() and len(parts[0]) == 4:
+        return f"{parts[0]}_{parts[1]}"
+    return card.id
 
 
 def _profile_nonempty(profile: GlobalStyleProfile) -> bool:

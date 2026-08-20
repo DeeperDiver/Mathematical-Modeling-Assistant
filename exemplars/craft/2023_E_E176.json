@@ -1,0 +1,1085 @@
+{
+  "card_id": "2023_E_E176",
+  "derivation": [
+    {
+      "section": "问题(1)时间关系分析",
+      "trigger": "需要刻画序列的周期性波动时",
+      "organization": [
+        "设定周期函数形式",
+        "利用周期约束确定角频率",
+        "分阶段进行最小二乘拟合"
+      ],
+      "notation_usage": "先定义变量和参数，再用希腊字母表示待估参数",
+      "depth_strategy": "只给出关键化简和最终拟合式，参数估计过程交给软件",
+      "text_formula_ratio": "每个公式前后配一句说明，解释代入条件或拟合效果",
+      "closing_moves": [
+        "绘制拟合效果图",
+        "从图形判断拟合精度较高"
+      ],
+      "examples": [
+        {
+          "function": "推导动机句",
+          "text": "为刻画序列的周期性波动，设其满足正弦函数形式。",
+          "note": "进行函数拟合前说明设定理由"
+        },
+        {
+          "function": "收尾句",
+          "text": "由拟合效果图可知，拟合精度较高。",
+          "note": "推导结束后用图形证据收束"
+        }
+      ]
+    },
+    {
+      "section": "问题(1)回归模型",
+      "trigger": "需要定量描述响应变量与解释变量的关系时",
+      "organization": [
+        "先做散点图判断线性关系",
+        "引入一元线性回归模型",
+        "估计参数并检验",
+        "进行残差诊断",
+        "解释系数含义"
+      ],
+      "notation_usage": "用β表示回归系数，ε表示误差项，并说明分布假设",
+      "depth_strategy": "回归形式直接给出，重点放在参数估计和检验结果的解读",
+      "text_formula_ratio": "公式引出后辅以表格呈现参数，再逐项解释统计量",
+      "closing_moves": [
+        "解释回归系数的经济或物理含义",
+        "结合残差图说明模型适用性"
+      ],
+      "examples": [
+        {
+          "function": "模型引出句",
+          "text": "基于上述散点图结论，建立响应变量对解释变量的回归模型。",
+          "note": "先图后模型"
+        },
+        {
+          "function": "结果解读句",
+          "text": "回归系数的置信区间不包含零，说明该解释变量影响显著。",
+          "note": "用统计检验支撑结论"
+        }
+      ]
+    },
+    {
+      "section": "问题(1)年总量估算",
+      "trigger": "需要由日均观测推算全年总量时",
+      "organization": [
+        "定义日均观测量",
+        "进行单位换算",
+        "写出全年求和公式",
+        "定义总量指标"
+      ],
+      "notation_usage": "用上标区分不同变量，符号在公式前定义",
+      "depth_strategy": "推导一步到位，仅保留单位换算过程",
+      "text_formula_ratio": "公式前后有简短文字说明换算关系",
+      "closing_moves": [
+        "计算结果列表",
+        "用直方图展示年度对比"
+      ],
+      "examples": [
+        {
+          "function": "推导过渡句",
+          "text": "根据单位换算关系，全年总量可表示为日均值的累加。",
+          "note": "说明公式来源"
+        }
+      ]
+    },
+    {
+      "section": "问题(2)周期性拟合",
+      "trigger": "经过时序图判定存在周期性后",
+      "organization": [
+        "设正弦函数形式",
+        "由周期确定角频率",
+        "代入实际周期",
+        "给出拟合结果"
+      ],
+      "notation_usage": "用A、ω、φ、C分别表示振幅、角频率、相位和截距",
+      "depth_strategy": "只给出最终拟合式，拟合过程不详细展开",
+      "text_formula_ratio": "公式前说明假设，公式后给出拟合效果",
+      "closing_moves": [
+        "绘制拟合效果图",
+        "由图形判断拟合较好"
+      ],
+      "examples": [
+        {
+          "function": "拟合设定句",
+          "text": "由于序列具有明显周期性，可用正弦函数近似描述其变化。",
+          "note": "拟合前交代依据"
+        }
+      ]
+    },
+    {
+      "section": "问题(3)傅里叶级数预测函数",
+      "trigger": "需要对周期性序列进行未来趋势预测时",
+      "organization": [
+        "引入狄利赫里条件保证收敛",
+        "展开傅里叶级数",
+        "根据周期截断级数阶数",
+        "给出误差检验公式"
+      ],
+      "notation_usage": "系数用a0、an、bn表示，阶数按实际需要截断",
+      "depth_strategy": "只给展开形式到截断阶数，系数估计结果用表格呈现",
+      "text_formula_ratio": "级数展开后接误差公式，再报告系数与误差",
+      "closing_moves": [
+        "绘制拟合效果图",
+        "比较模拟误差与预测误差"
+      ],
+      "examples": [
+        {
+          "function": "展开说明句",
+          "text": "在满足收敛条件的前提下，将序列展成傅里叶级数并截断到有限阶。",
+          "note": "说明展开与截断依据"
+        }
+      ]
+    },
+    {
+      "section": "问题(3)监测方案0-1规划模型",
+      "trigger": "需要在保证信息覆盖的前提下最小化监测次数时",
+      "organization": [
+        "定义差分作为动态信息度量",
+        "定义0-1决策变量",
+        "写出目标函数",
+        "写出信息覆盖约束",
+        "汇总为0-1规划模型"
+      ],
+      "notation_usage": "用差分变量表示信息量，用0-1变量表示是否监测",
+      "depth_strategy": "从问题背景逐步转化为约束条件，保留关键建模步骤",
+      "text_formula_ratio": "每引入一个符号后配一句解释，最后汇总模型",
+      "closing_moves": [
+        "进行参数估计",
+        "求解并解释最优解"
+      ],
+      "examples": [
+        {
+          "function": "转化句",
+          "text": "该问题可转化为在满足信息覆盖约束下最小化选择次数的问题。",
+          "note": "说明建模思路"
+        }
+      ]
+    },
+    {
+      "section": "问题(4)微元法计算平均高程",
+      "trigger": "需要由离散断面点计算平均值时",
+      "organization": [
+        "对观测点排序",
+        "计算相邻间距和平均高度",
+        "求和得到面积",
+        "除以总宽度得到平均高程"
+      ],
+      "notation_usage": "用差分符号表示相邻距离，面积微元用dS表示",
+      "depth_strategy": "以步骤列表逐步给出，不跳过近似中间步骤",
+      "text_formula_ratio": "步骤说明与公式交替出现",
+      "closing_moves": [
+        "绘制变化图",
+        "从图中解读变化趋势"
+      ],
+      "examples": [
+        {
+          "function": "步骤引入句",
+          "text": "为计算平均高程，先将观测点按横坐标排序，再逐段近似求和。",
+          "note": "交代方法流程"
+        }
+      ]
+    },
+    {
+      "section": "问题(4)灰色预测模型",
+      "trigger": "当样本时间点较少且需要外推预测时",
+      "organization": [
+        "构造新的时间序列",
+        "进行平移使序列为正",
+        "建立灰色预测模型",
+        "预测后再还原"
+      ],
+      "notation_usage": "用新符号表示平移后的序列，预测值用帽子符号标记",
+      "depth_strategy": "只给出构造和还原关系，模型内部求解交给软件",
+      "text_formula_ratio": "变换关系用公式表示，前后各配一句说明",
+      "closing_moves": [
+        "用表格列出预测数据",
+        "绘制未来演变趋势图"
+      ],
+      "examples": [
+        {
+          "function": "构造句",
+          "text": "由于样本点较少，先构造新的序列再进行预测，最后还原到原量纲。",
+          "note": "说明建模策略"
+        }
+      ]
+    }
+  ],
+  "algorithm": [
+    {
+      "algorithm_type": "非参数趋势检验",
+      "presentation": [
+        "文字说明",
+        "检验图"
+      ],
+      "flow_organization": [
+        "方法原理介绍",
+        "统计量含义说明",
+        "判断规则说明",
+        "输出两条曲线",
+        "解读交点与临界线"
+      ],
+      "complexity_analysis": "未单独给出复杂度，重点在统计量判断",
+      "convergence_justification": "通过显著性水平与临界线判断趋势是否显著",
+      "result_reporting": "按UF符号、超过临界线范围、曲线交点顺序报告",
+      "support_figures": [
+        "趋势检验图"
+      ],
+      "examples": [
+        {
+          "function": "算法描述句",
+          "text": "该方法通过构造正向和反向统计量序列来识别趋势与突变区间。",
+          "note": "算法前先介绍原理"
+        },
+        {
+          "function": "判断规则句",
+          "text": "当统计量超过临界线时，认为趋势显著；两曲线交点为突变开始时刻。",
+          "note": "给出判定标准"
+        }
+      ]
+    },
+    {
+      "algorithm_type": "有序聚类或最优分割",
+      "presentation": [
+        "文字原理",
+        "分类结果图"
+      ],
+      "flow_organization": [
+        "方法原理",
+        "有序分类思想",
+        "对序列进行分割",
+        "根据分类结果判断突变点"
+      ],
+      "complexity_analysis": "未给出复杂度分析",
+      "convergence_justification": "以类内差异最小、类间差异最大为最优分类准则",
+      "result_reporting": "报告分类结果并与前一方法交叉验证",
+      "support_figures": [
+        "突变点分类图"
+      ],
+      "examples": [
+        {
+          "function": "原理句",
+          "text": "该方法在有序样品中寻找分割，使类内差异最小而类间差异最大。",
+          "note": "方法介绍"
+        }
+      ]
+    },
+    {
+      "algorithm_type": "时频分析",
+      "presentation": [
+        "文字原理",
+        "小波等值线图",
+        "方差分析图"
+      ],
+      "flow_organization": [
+        "方法原理",
+        "作小波变换",
+        "绘制等值线图",
+        "绘制方差图",
+        "解读周期与突变点"
+      ],
+      "complexity_analysis": "未给出复杂度分析",
+      "convergence_justification": "通过多尺度振荡与方差主周期支撑结论",
+      "result_reporting": "先报告各尺度振荡特征，再报告主周期和突变点",
+      "support_figures": [
+        "小波等值线图",
+        "小波方差分析图"
+      ],
+      "examples": [
+        {
+          "function": "方法引入句",
+          "text": "为详细寻找序列的周期和突变点，引入时频局域化分析方法。",
+          "note": "说明使用动机"
+        }
+      ]
+    },
+    {
+      "algorithm_type": "长程记忆检验或分形分析",
+      "presentation": [
+        "方法原理",
+        "散点图",
+        "结果表"
+      ],
+      "flow_organization": [
+        "方法原理",
+        "统计量含义",
+        "绘制统计量散点图",
+        "分阶段检验与预测"
+      ],
+      "complexity_analysis": "未给出复杂度分析",
+      "convergence_justification": "若散点线性关系成立，则指数有效",
+      "result_reporting": "分阶段报告指数值并判断持续性或反转性",
+      "support_figures": [
+        "统计量散点图"
+      ],
+      "examples": [
+        {
+          "function": "判断句",
+          "text": "当指数小于0.5时，序列未来变化将与过去总体趋势相反。",
+          "note": "给参数阈值判断规则"
+        }
+      ]
+    },
+    {
+      "algorithm_type": "函数逼近或时间序列预测",
+      "presentation": [
+        "公式展开",
+        "系数表",
+        "拟合图"
+      ],
+      "flow_organization": [
+        "建立级数展开",
+        "估计系数",
+        "拟合历史数据",
+        "预测未来数据",
+        "误差估计"
+      ],
+      "complexity_analysis": "通过截断阶数说明模型复杂度",
+      "convergence_justification": "以狄利赫里条件保证级数收敛",
+      "result_reporting": "从拟合效果和误差两方面报告预测效果",
+      "support_figures": [
+        "拟合效果图",
+        "过去值与未来值比较图"
+      ],
+      "examples": [
+        {
+          "function": "截断说明句",
+          "text": "根据序列周期，将级数截断到有限阶，以平衡拟合精度与计算复杂。",
+          "note": "说明截断理由"
+        }
+      ]
+    },
+    {
+      "algorithm_type": "精确组合优化",
+      "presentation": [
+        "模型公式",
+        "参数表",
+        "最优解表"
+      ],
+      "flow_organization": [
+        "问题转化",
+        "定义决策变量",
+        "写出目标函数与约束",
+        "参数估计",
+        "软件求解",
+        "结果检验"
+      ],
+      "complexity_analysis": "未展开复杂度分析，但说明存在最优解",
+      "convergence_justification": "0-1规划问题存在最优解",
+      "result_reporting": "报告各时间点是否监测，并解释减少监测次数的原因",
+      "support_figures": [
+        "参数和最优解表"
+      ],
+      "examples": [
+        {
+          "function": "算法输出句",
+          "text": "求解得到各时间点的最优选择，并对比相邻时间点变化验证合理性。",
+          "note": "结果报告方式"
+        }
+      ]
+    },
+    {
+      "algorithm_type": "灰色预测",
+      "presentation": [
+        "公式推导",
+        "结果表",
+        "趋势图"
+      ],
+      "flow_organization": [
+        "构造新序列",
+        "平移为正",
+        "建立预测模型",
+        "预测",
+        "还原"
+      ],
+      "complexity_analysis": "未给出复杂度分析",
+      "convergence_justification": "通过模拟数据与预测数据的趋势合理性判断",
+      "result_reporting": "列出预测数据并绘制演变趋势图",
+      "support_figures": [
+        "未来演变趋势图"
+      ],
+      "examples": [
+        {
+          "function": "预测句",
+          "text": "先对序列进行变换以满足模型要求，预测后再还原到原始量纲。",
+          "note": "说明预测流程"
+        }
+      ]
+    },
+    {
+      "algorithm_type": "数值积分或几何近似",
+      "presentation": [
+        "步骤列表"
+      ],
+      "flow_organization": [
+        "排序",
+        "计算相邻间距",
+        "计算平均高度",
+        "计算面积微元",
+        "求和",
+        "求平均"
+      ],
+      "complexity_analysis": "未给出复杂度分析",
+      "convergence_justification": "以相邻点近似代替连续曲面，近似精度取决于数据间隔",
+      "result_reporting": "按步骤得到均值后，用图展示变化",
+      "support_figures": [
+        "断面示意图",
+        "变化曲线"
+      ],
+      "examples": [
+        {
+          "function": "步骤句",
+          "text": "先按横坐标排序，再逐段计算面积微元并累加，最后除以总宽度。",
+          "note": "描述计算流程"
+        }
+      ]
+    }
+  ],
+  "interpretation": [
+    {
+      "target": "回归参数",
+      "organization": [
+        "先说明正负关系",
+        "再说明弹性含义",
+        "判断敏感程度"
+      ],
+      "domain_linking": "将参数含义与业务场景中的变化率联系",
+      "parameter_meaning": "回归系数可解释为解释变量变化百分之一时响应变量的百分比变化",
+      "sensitivity_handling": "通过系数大小判断响应变量对解释变量的敏感性",
+      "common_moves": [
+        "回归系数检验通过后解读符号",
+        "结合弹性解释变化幅度"
+      ],
+      "examples": [
+        {
+          "function": "参数解释句",
+          "text": "该系数为正，说明解释变量与响应变量同向变动，且响应变量对解释变量的变化较为敏感。",
+          "note": "先符号后敏感度"
+        }
+      ]
+    },
+    {
+      "target": "季节性结果",
+      "organization": [
+        "先识别旺季淡季",
+        "再与月份分布相互印证"
+      ],
+      "domain_linking": "将季节指数与业务高峰期联系",
+      "parameter_meaning": "指数大于1表示旺期，小于1表示淡期",
+      "sensitivity_handling": "无",
+      "common_moves": [
+        "从图中可得出以下结论",
+        "计算季节指数后给出分段结论"
+      ],
+      "examples": [
+        {
+          "function": "结果解读句",
+          "text": "由季节指数可知，该序列在部分时段为旺季，其余时段为淡季。",
+          "note": "概括季节特征"
+        }
+      ]
+    },
+    {
+      "target": "趋势检验结果",
+      "organization": [
+        "先看统计量符号",
+        "再看是否超过临界线",
+        "最后看交点确定突变时刻"
+      ],
+      "domain_linking": "将统计结果与序列实际变化趋势联系",
+      "parameter_meaning": "统计量大于零表示上升趋势，超过临界线表示趋势显著",
+      "sensitivity_handling": "以显著性水平0.05对应的临界线为判断标准",
+      "common_moves": [
+        "从检验图中可得出结论",
+        "两曲线交点为突变开始时刻"
+      ],
+      "examples": [
+        {
+          "function": "趋势解读句",
+          "text": "统计量从某一时刻起大于零，表明序列呈上升趋势，且超过临界线后趋势显著。",
+          "note": "按图解读顺序"
+        }
+      ]
+    },
+    {
+      "target": "时频分析结果",
+      "organization": [
+        "先看出等值线图的振荡尺度",
+        "再看方差图确定主周期",
+        "综合给出周期和突变点"
+      ],
+      "domain_linking": "将周期与序列高活跃期、低活跃期对应，突变点与状态变化对应",
+      "parameter_meaning": "时间尺度表示周期长度，振幅大小反映振荡强度",
+      "sensitivity_handling": "无",
+      "common_moves": [
+        "在……时间尺度上振荡明显",
+        "主周期在……附近"
+      ],
+      "examples": [
+        {
+          "function": "周期解读句",
+          "text": "序列在某一时间尺度上振荡明显，方差图显示该尺度为主周期。",
+          "note": "由等值线到方差图综合"
+        }
+      ]
+    },
+    {
+      "target": "Hurst指数",
+      "organization": [
+        "先说明0.5基准含义",
+        "再根据指数所在区间判断持续性或反转性"
+      ],
+      "domain_linking": "将指数判断结果用于未来趋势预测",
+      "parameter_meaning": "指数在0到1之间，0.5对应独立随机序列",
+      "sensitivity_handling": "无",
+      "common_moves": [
+        "当指数小于0.5时，未来变化将与过去总体趋势相反"
+      ],
+      "examples": [
+        {
+          "function": "参数判断句",
+          "text": "该指数低于0.5，表明序列具有反持续性，未来走势可能与过去相反。",
+          "note": "先阈值后判断"
+        }
+      ]
+    },
+    {
+      "target": "监测方案结果",
+      "organization": [
+        "先指出未监测时间点",
+        "再解释差分值小导致信息冗余"
+      ],
+      "domain_linking": "在节约监测资源的同时保证动态信息覆盖",
+      "parameter_meaning": "差分值表示相邻时间点的变化幅度，可作为信息量度量",
+      "sensitivity_handling": "无",
+      "common_moves": [
+        "由于该时间点差分值最小，表明与相邻时间点变化不大，故可不监测"
+      ],
+      "examples": [
+        {
+          "function": "结果检验句",
+          "text": "最优方案在信息量较小的时间点不安排监测，从而减少监测次数。",
+          "note": "解释方案合理性"
+        }
+      ]
+    },
+    {
+      "target": "效果评价结果",
+      "organization": [
+        "先比较前后时段指标变化",
+        "再判定效果是否显著"
+      ],
+      "domain_linking": "将指标变化与实际干预效果联系",
+      "parameter_meaning": "平均高程、通量等指标用于衡量干预前后差异",
+      "sensitivity_handling": "无",
+      "common_moves": [
+        "成效显著或不佳",
+        "与前一阶段相比下降或上升"
+      ],
+      "examples": [
+        {
+          "function": "效果评价句",
+          "text": "对比前后时段指标可知，该时段干预效果并不明显，指标呈下降趋势。",
+          "note": "先比较后判定"
+        }
+      ]
+    }
+  ],
+  "writing": [
+    {
+      "function": "摘要结果句",
+      "examples": [
+        {
+          "function": "摘要结果句",
+          "text": "首先对原始数据进行整理，其次建立模型分析变化规律，最后给出优化方案。",
+          "note": "摘要中按问题顺序概括步骤"
+        },
+        {
+          "function": "摘要结果句",
+          "text": "本文建立了多种分析模型，并通过交叉验证增强了结论的可靠性。",
+          "note": "摘要中强调方法交叉"
+        }
+      ],
+      "usage_notes": "用于摘要中概括各部分方法、结果与结论，通常采用“首先…其次…最后…”结构。"
+    },
+    {
+      "function": "假设铺垫句",
+      "examples": [
+        {
+          "function": "假设铺垫句",
+          "text": "为了简化问题，作如下假设：",
+          "note": "在模型建立前集中列出假设"
+        },
+        {
+          "function": "假设铺垫句",
+          "text": "假设序列独立且满足所需数学条件。",
+          "note": "为后续算法应用提供前提"
+        }
+      ],
+      "usage_notes": "用于在建模前明确理想化条件，避免模型适用范围不清。"
+    },
+    {
+      "function": "过渡衔接句",
+      "examples": [
+        {
+          "function": "过渡衔接句",
+          "text": "基于上述分析，下面建立相应的数学模型。",
+          "note": "章节间自然过渡"
+        },
+        {
+          "function": "过渡衔接句",
+          "text": "本文研究路径如图所示。",
+          "note": "用图衔接全文结构"
+        }
+      ],
+      "usage_notes": "用于问题分析、章节之间或方法切换处，使行文逻辑连贯。"
+    },
+    {
+      "function": "结果解读句",
+      "examples": [
+        {
+          "function": "结果解读句",
+          "text": "从图中可得出以下结论：",
+          "note": "引出图形结论"
+        },
+        {
+          "function": "结果解读句",
+          "text": "从表中可知，参数估计通过检验，拟合精度较高。",
+          "note": "表格后总结统计结论"
+        }
+      ],
+      "usage_notes": "用于图表后总结发现，通常先指出整体趋势，再分条说明具体判断。"
+    },
+    {
+      "function": "结论升华句",
+      "examples": [
+        {
+          "function": "结论升华句",
+          "text": "本文所使用的模型或方法可以推广到同类分析问题中。",
+          "note": "模型评价部分强调推广价值"
+        },
+        {
+          "function": "结论升华句",
+          "text": "多种方法交叉验证，增强了结论的可靠性。",
+          "note": "总结方法优势"
+        }
+      ],
+      "usage_notes": "用于模型评价和推广部分，突出方法通用性和稳健性。"
+    },
+    {
+      "function": "局限说明句",
+      "examples": [
+        {
+          "function": "局限说明句",
+          "text": "不足之处是在预测时难以给出突变点数值，导致突变点处误差较大。",
+          "note": "指出预测局限"
+        },
+        {
+          "function": "局限说明句",
+          "text": "模型在数据稀疏阶段的外推精度有限。",
+          "note": "说明适用范围限制"
+        }
+      ],
+      "usage_notes": "用于模型缺点部分，需客观指出方法缺陷，避免过度夸大。"
+    }
+  ],
+  "figure_placements": [
+    {
+      "figure_type": "flow_chart",
+      "section": "问题分析",
+      "argument_role": "展示全文研究路径与各问题间逻辑关系",
+      "caption_style": "简写为“研究路径”"
+    },
+    {
+      "figure_type": "scatter",
+      "section": "问题(1)时间关系分析",
+      "argument_role": "展示原始时序中的离群点，为剔除提供依据",
+      "caption_style": "图注以变量名加“时序图”命名"
+    },
+    {
+      "figure_type": "scatter",
+      "section": "问题(1)时间关系分析",
+      "argument_role": "展示剔除离群点后的趋势与周期",
+      "caption_style": "图注以“剔除离群点后的时序图”命名"
+    },
+    {
+      "figure_type": "line",
+      "section": "问题(1)时间关系分析",
+      "argument_role": "展示月份指数以识别旺季淡季",
+      "caption_style": "图注简写“月份指数”"
+    },
+    {
+      "figure_type": "bar",
+      "section": "问题(1)时间关系分析",
+      "argument_role": "展示季度指数以识别季度差异",
+      "caption_style": "图注简写“季度指数”"
+    },
+    {
+      "figure_type": "line",
+      "section": "问题(1)时间关系分析",
+      "argument_role": "展示分段拟合效果，论证拟合精度",
+      "caption_style": "图注标明拟合时间段"
+    },
+    {
+      "figure_type": "line",
+      "section": "问题(1)时间关系分析",
+      "argument_role": "展示另一分段拟合效果",
+      "caption_style": "图注标明拟合时间段"
+    },
+    {
+      "figure_type": "scatter_matrix",
+      "section": "问题(1)回归分析",
+      "argument_role": "展示变量两两相关关系，支持建立回归模型",
+      "caption_style": "图注标明“散点图”"
+    },
+    {
+      "figure_type": "histogram",
+      "section": "问题(1)回归分析",
+      "argument_role": "检验残差近似正态分布",
+      "caption_style": "图注说明标准化残差直方图"
+    },
+    {
+      "figure_type": "scatter",
+      "section": "问题(1)回归分析",
+      "argument_role": "检验残差独立且方差恒定",
+      "caption_style": "图注说明标准化残差散点图"
+    },
+    {
+      "figure_type": "histogram",
+      "section": "问题(1)回归分析",
+      "argument_role": "检验另一回归模型的残差正态性",
+      "caption_style": "图注说明标准化残差直方图"
+    },
+    {
+      "figure_type": "scatter",
+      "section": "问题(1)回归分析",
+      "argument_role": "检验另一回归模型残差随机性",
+      "caption_style": "图注说明标准化残差散点图"
+    },
+    {
+      "figure_type": "bar",
+      "section": "问题(1)总量估算",
+      "argument_role": "展示年总量对比",
+      "caption_style": "图注简写“年总量”"
+    },
+    {
+      "figure_type": "bar",
+      "section": "问题(1)总量估算",
+      "argument_role": "展示另一年总量对比",
+      "caption_style": "图注简写“年总量”"
+    },
+    {
+      "figure_type": "line",
+      "section": "问题(2)季节性分析",
+      "argument_role": "展示第一序列月份指数以识别旺季淡季",
+      "caption_style": "图注以变量名加“月份指数”命名"
+    },
+    {
+      "figure_type": "line",
+      "section": "问题(2)季节性分析",
+      "argument_role": "展示第二序列月份指数以识别旺季淡季",
+      "caption_style": "图注以变量名加“月份指数”命名"
+    },
+    {
+      "figure_type": "line",
+      "section": "问题(2)周期性分析",
+      "argument_role": "展示第一序列时序趋势和突变现象",
+      "caption_style": "图注以变量名加“时序图”命名"
+    },
+    {
+      "figure_type": "line",
+      "section": "问题(2)周期性分析",
+      "argument_role": "展示第二序列时序趋势和突变现象",
+      "caption_style": "图注以变量名加“时序图”命名"
+    },
+    {
+      "figure_type": "line",
+      "section": "问题(2)周期性分析",
+      "argument_role": "展示第一序列拟合效果",
+      "caption_style": "图注以变量名加“时序图”命名，但实际展示拟合"
+    },
+    {
+      "figure_type": "line",
+      "section": "问题(2)周期性分析",
+      "argument_role": "展示第二序列拟合效果",
+      "caption_style": "图注以变量名加“时序图”命名，但实际展示拟合"
+    },
+    {
+      "figure_type": "line",
+      "section": "问题(2)突变性分析",
+      "argument_role": "展示趋势检验曲线与临界线，定位突变",
+      "caption_style": "图注标明“趋势检验”"
+    },
+    {
+      "figure_type": "line",
+      "section": "问题(2)突变性分析",
+      "argument_role": "展示第二序列趋势检验曲线与临界线",
+      "caption_style": "图注标明“趋势检验”"
+    },
+    {
+      "figure_type": "line",
+      "section": "问题(2)突变性分析",
+      "argument_role": "展示有序聚类分类结果，指示突变点",
+      "caption_style": "图注标明“突变点”"
+    },
+    {
+      "figure_type": "line",
+      "section": "问题(2)突变性分析",
+      "argument_role": "展示第二序列有序聚类分类结果",
+      "caption_style": "图注标明“突变点”"
+    },
+    {
+      "figure_type": "contour",
+      "section": "问题(2)时频分析",
+      "argument_role": "展示不同时间尺度的振荡强弱",
+      "caption_style": "图注标明“小波等值线图”"
+    },
+    {
+      "figure_type": "line",
+      "section": "问题(2)时频分析",
+      "argument_role": "展示方差随尺度的变化，确定主周期",
+      "caption_style": "图注标明“小波方差分析图”"
+    },
+    {
+      "figure_type": "contour",
+      "section": "问题(2)时频分析",
+      "argument_role": "展示第二序列不同尺度振荡",
+      "caption_style": "图注标明“小波等值线图”"
+    },
+    {
+      "figure_type": "line",
+      "section": "问题(2)时频分析",
+      "argument_role": "展示第二序列方差主周期",
+      "caption_style": "图注标明“小波方差分析图”"
+    },
+    {
+      "figure_type": "scatter",
+      "section": "问题(3)分形特征",
+      "argument_role": "验证统计量线性关系，说明指数有效",
+      "caption_style": "图注标明统计量散点图"
+    },
+    {
+      "figure_type": "scatter",
+      "section": "问题(3)分形特征",
+      "argument_role": "验证第二序列统计量线性关系",
+      "caption_style": "图注标明统计量散点图"
+    },
+    {
+      "figure_type": "line",
+      "section": "问题(3)预测",
+      "argument_role": "展示拟合效果比较",
+      "caption_style": "图注标明“拟合效果比较”"
+    },
+    {
+      "figure_type": "line",
+      "section": "问题(3)预测",
+      "argument_role": "展示第二序列拟合效果比较",
+      "caption_style": "图注标明“拟合效果比较”"
+    },
+    {
+      "figure_type": "line",
+      "section": "问题(3)预测",
+      "argument_role": "展示过去值与未来值比较，论证预测合理性",
+      "caption_style": "图注标明“过去值与未来值的比较”"
+    },
+    {
+      "figure_type": "line",
+      "section": "问题(3)预测",
+      "argument_role": "展示第二序列过去值与未来值比较",
+      "caption_style": "图注标明“过去值与未来值的比较”"
+    },
+    {
+      "figure_type": "contour",
+      "section": "问题(3)监测方案",
+      "argument_role": "展示未来2年振荡变化，为监测方案提供依据",
+      "caption_style": "图注标明“小波等值线图”"
+    },
+    {
+      "figure_type": "contour",
+      "section": "问题(3)监测方案",
+      "argument_role": "展示第二序列未来2年振荡变化",
+      "caption_style": "图注标明“小波等值线图”"
+    },
+    {
+      "figure_type": "schematic",
+      "section": "问题(4)平均高程计算",
+      "argument_role": "说明断面与起点距定义",
+      "caption_style": "图注标明“断面示意图”"
+    },
+    {
+      "figure_type": "line",
+      "section": "问题(4)效果分析",
+      "argument_role": "展示高程变化情况，评价干预效果",
+      "caption_style": "图注标明“高程变化情况”"
+    },
+    {
+      "figure_type": "line",
+      "section": "问题(4)效果分析",
+      "argument_role": "展示通量指标变化，评价效果",
+      "caption_style": "图注标明“通量变化情况”"
+    },
+    {
+      "figure_type": "line",
+      "section": "问题(4)效果分析",
+      "argument_role": "展示日均通量指标变化",
+      "caption_style": "图注标明“日均通量变化”"
+    },
+    {
+      "figure_type": "line",
+      "section": "问题(4)预测",
+      "argument_role": "展示未来高程演变趋势",
+      "caption_style": "图注标明“未来高程变化”"
+    }
+  ],
+  "section_focuses": [
+    {
+      "section": "摘要",
+      "focus": "按问题顺序概括主要结果、方法优缺点与推广价值",
+      "weight": 0.05,
+      "internal_order": [
+        "背景与数据整理",
+        "问题1结果",
+        "问题2结果",
+        "问题3结果",
+        "问题4结果",
+        "优缺点与推广"
+      ]
+    },
+    {
+      "section": "问题重述",
+      "focus": "改写题目背景和四个具体问题，明确任务边界",
+      "weight": 0.04,
+      "internal_order": [
+        "背景意义",
+        "四个问题"
+      ]
+    },
+    {
+      "section": "问题分析",
+      "focus": "按问题分解任务，提出总体研究路径图",
+      "weight": 0.05,
+      "internal_order": [
+        "数据整理",
+        "问题1思路",
+        "问题2思路",
+        "问题3思路",
+        "问题4思路",
+        "敏感性分析说明"
+      ]
+    },
+    {
+      "section": "符号说明",
+      "focus": "集中定义全文常用变量和符号",
+      "weight": 0.02,
+      "internal_order": [
+        "变量定义",
+        "补充说明"
+      ]
+    },
+    {
+      "section": "模型假设",
+      "focus": "给出简化假设和数学条件",
+      "weight": 0.02,
+      "internal_order": [
+        "数据可靠性假设",
+        "基准面假设",
+        "数学条件假设",
+        "独立序列假设",
+        "干预周期假设"
+      ]
+    },
+    {
+      "section": "数据整理",
+      "focus": "说明数据清洗与补齐方式，展示样表",
+      "weight": 0.03,
+      "internal_order": [
+        "数据检查",
+        "缺失填充",
+        "闰年处理",
+        "样表展示"
+      ]
+    },
+    {
+      "section": "问题(1)模型建立与求解",
+      "focus": "建立响应变量与时间、解释变量的分段拟合和回归模型，推算年度总量",
+      "weight": 0.2,
+      "internal_order": [
+        "时序图与离群点处理",
+        "月份或季度指数",
+        "正弦拟合",
+        "散点图与相关判断",
+        "回归建模与残差诊断",
+        "年总量估算"
+      ]
+    },
+    {
+      "section": "问题(2)模型建立与求解",
+      "focus": "从统计特征、季节性、周期性、突变性和时频特征多角度分析序列规律",
+      "weight": 0.25,
+      "internal_order": [
+        "统计特征",
+        "月份分布与季节指数",
+        "时序图与周期拟合",
+        "趋势检验",
+        "有序聚类突变点",
+        "时频分析"
+      ]
+    },
+    {
+      "section": "问题(3)模型建立与求解",
+      "focus": "先判断未来趋势，再预测未来数据，最后建立0-1规划制定监测方案",
+      "weight": 0.2,
+      "internal_order": [
+        "分形特征与趋势判断",
+        "级数预测函数",
+        "拟合与误差估计",
+        "未来2年时频特征",
+        "背包问题转化与0-1规划",
+        "求解与结果检验"
+      ]
+    },
+    {
+      "section": "问题(4)模型建立与求解",
+      "focus": "通过微元法和指标对比评估干预效果，并用灰色模型预测未来10年趋势",
+      "weight": 0.12,
+      "internal_order": [
+        "微元法计算平均高程",
+        "评价对高程的影响",
+        "评价对通量指标的影响",
+        "评价对另一通量指标的影响",
+        "灰色预测未来趋势"
+      ]
+    },
+    {
+      "section": "模型评价与推广",
+      "focus": "总结方法优点、不足及推广方向",
+      "weight": 0.02,
+      "internal_order": [
+        "模型优点",
+        "模型缺点",
+        "模型推广"
+      ]
+    }
+  ],
+  "argument_flow": {
+    "steps": [
+      "问题重述",
+      "问题分析",
+      "模型假设与符号说明",
+      "数据整理",
+      "分问题建立与求解模型",
+      "方法交叉验证与结果检验",
+      "模型评价与推广"
+    ],
+    "transitions": [
+      "通过问题重述明确任务，引出问题分析",
+      "由问题分析划分各问题解题路径，并画出研究路径图",
+      "在建模前集中给出符号与假设，为后续推导铺垫",
+      "先完成数据清洗，为所有模型提供输入",
+      "按问题顺序逐一建模，每个问题内部先做描述性分析再建立定量模型",
+      "对突变性、周期性等用多种方法交叉验证，增强结论可信度",
+      "最后总结方法优缺点并说明推广价值"
+    ]
+  },
+  "created_at": "2026-08-18T17:49:59.885202Z"
+}

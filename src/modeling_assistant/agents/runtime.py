@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import ast
+import json
 import logging
 import os
 import re
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import httpx
 from openai import OpenAI
 from pydantic import BaseModel
 
@@ -96,6 +99,8 @@ class AgentRuntime:
     prompts: PromptCatalog
     searcher: Searcher = field(default_factory=StubSearcher)
     client: OpenAI = field(init=False)
+    # V17 usage 记账：每次 LLM 调用的 token 用量（含缓存命中/未命中）
+    usage_log: list[dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         api_key = self.settings.api_key
@@ -103,6 +108,11 @@ class AgentRuntime:
             self.client = OpenAI(
                 api_key=api_key,
                 base_url=self.settings.api_base_url + "/v1",
+                # V16 修复：DeepSeek 长响应偶发连接中断/read timeout，
+                # httpx 默认可能挂起数小时。显式设置超时上限：
+                # 连接 30s + 读取 300s，超时快速失败并走 invoke 重试，
+                # 避免单次 LLM 调用阻塞流程 2-3 小时。
+                timeout=httpx.Timeout(300.0, connect=30.0),
             )
         else:
             logger.warning(
@@ -133,7 +143,20 @@ class AgentRuntime:
         merged_extra: dict[str, Any] = {
             "llm_model": self.settings.llm_model,
             "output_dir": str(self.settings.output_dir),
+            "method_knowledge_enabled": self.settings.method_knowledge_enabled,
         }
+        # V15：论文模板结构（writer 按模板章节输出；模板缺失时为空数组 + active=false）
+        try:
+            from modeling_assistant.data.paper_template import load_template_structure
+
+            template_structure = load_template_structure(self.settings.paper_template_dir)
+        except Exception as exc:
+            logger.warning("论文模板结构加载失败: %s", exc)
+            template_structure = None
+        merged_extra["paper_template_structure"] = json.dumps(
+            template_structure or [], ensure_ascii=False
+        )
+        merged_extra["paper_template_active"] = "true" if template_structure else "false"
         if extra:
             merged_extra.update(extra)
         context = PromptContext(
@@ -158,19 +181,114 @@ class AgentRuntime:
             )
         if system_prompt is None:
             system_prompt = self.render_prompt(prompt_name, state)
-        logger.info("Invoking LLM [%s] model=%s", prompt_name, self.settings.llm_model)
-
-        response = self.client.chat.completions.create(
-            model=self.settings.llm_model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": "请执行你的任务，严格按要求的格式输出。"},
-            ],
-            temperature=0.3,
+        max_tokens = self.settings.max_tokens_for(prompt_name)
+        logger.info(
+            "Invoking LLM [%s] model=%s max_tokens=%d",
+            prompt_name,
+            self.settings.llm_model,
+            max_tokens,
         )
-        content = response.choices[0].message.content or ""
+
+        # V15.1 修复：推理模型（deepseek-v4-flash 等）在非流式调用 + 长 prompt 下
+        # 会把输出全部消耗在 reasoning_content，导致 content 为空（finish=stop）。
+        # 改用 stream 逐块收集 content，与 DeepSeek 对 reasoner 模型的官方建议一致。
+        content_parts: list[str] = []
+        finish_reason = None
+        usage = None
+        try:
+            response = self.client.chat.completions.create(
+                model=self.settings.llm_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": "请执行你的任务，严格按要求的格式输出。"},
+                ],
+                temperature=0.3,
+                max_tokens=max_tokens,
+                stream=True,
+                stream_options={"include_usage": True},
+            )
+            for chunk in response:
+                if not getattr(chunk, "choices", None):
+                    # 含 usage 的流尾块（stream_options.include_usage）
+                    usage = getattr(chunk, "usage", None) or usage
+                    continue
+                choice = chunk.choices[0]
+                if choice.finish_reason:
+                    finish_reason = choice.finish_reason
+                delta = getattr(choice, "delta", None)
+                if delta is not None and getattr(delta, "content", None):
+                    content_parts.append(delta.content)
+            content = "".join(content_parts)
+        except Exception as exc:
+            # 调用/流式异常：记录带 error 的 usage 条目后原样抛出
+            self._record_usage(prompt_name, usage, finish_reason, "", error=str(exc)[:200])
+            raise
+        self._record_usage(prompt_name, usage, finish_reason, content)
+        if not content.strip():
+            logger.warning(
+                "LLM [%s] 返回空 content（finish=%s，usage=%s），将触发重试",
+                prompt_name,
+                finish_reason,
+                usage,
+            )
         logger.info("LLM [%s] 返回 %d 字符", prompt_name, len(content))
         return content
+
+    def _record_usage(
+        self,
+        prompt_name: str,
+        usage: Any,
+        finish_reason: str | None,
+        content: str,
+        error: str | None = None,
+    ) -> None:
+        """V17 usage 记账：记录每次调用的 token 用量并追加到 usage.jsonl。
+
+        兼容两种缓存字段风格：
+        - usage.prompt_cache_hit_tokens / prompt_cache_miss_tokens（DeepSeek）
+        - usage.prompt_tokens_details.cached_tokens（OpenAI 风格）
+        """
+        try:
+            prompt_tokens = int(getattr(usage, "prompt_tokens", 0) or 0)
+            completion_tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+            total_tokens = int(getattr(usage, "total_tokens", 0) or 0) or (
+                prompt_tokens + completion_tokens
+            )
+            cached = getattr(usage, "prompt_cache_hit_tokens", None)
+            details = getattr(usage, "prompt_tokens_details", None)
+            if cached is None:
+                if isinstance(details, dict):
+                    cached = details.get("cached_tokens")
+                else:
+                    cached = getattr(details, "cached_tokens", None)
+            cache_hit = int(cached or 0)
+            cache_miss = int(getattr(usage, "prompt_cache_miss_tokens", 0) or 0)
+            if not cache_miss:
+                cache_miss = max(prompt_tokens - cache_hit, 0)
+            entry = {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "prompt_name": prompt_name,
+                "model": self.settings.llm_model,
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": total_tokens,
+                "cache_hit_tokens": cache_hit,
+                "cache_miss_tokens": cache_miss,
+                "finish_reason": finish_reason,
+                "output_chars": len(content),
+                "error": error,
+            }
+            self.usage_log.append(entry)
+            # 先落盘 JSONL（崩溃不丢），与 process_log 同一目录
+            try:
+                log_dir = self.settings.output_dir / "logs"
+                log_dir.mkdir(parents=True, exist_ok=True)
+                with open(log_dir / "usage.jsonl", "a", encoding="utf-8") as f:
+                    f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
+        except Exception as exc:
+            logger.warning("usage 记账失败: %s", exc)
 
     def invoke_structured(
         self,
@@ -193,6 +311,8 @@ class AgentRuntime:
         for attempt in range(max_retries + 1):
             try:
                 raw = self.invoke(prompt_name, state, system_prompt=system_prompt)
+                if not raw or not raw.strip():
+                    raise ValueError("LLM 返回空内容，无法解析结构化输出")
                 json_str = _extract_json(raw)
                 return response_model.model_validate_json(json_str)
             except Exception as exc:
