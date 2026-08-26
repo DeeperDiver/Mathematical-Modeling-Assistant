@@ -31,10 +31,29 @@ def _print_interrupt_info(interrupt_data: dict) -> None:
     print(f"  {interrupt_data.get('hint', '')}")
     print("-" * 60)
 
+    review = interrupt_data.get("assumption_review")
+    if review:
+        print("  假设分类：")
+        print(f"    【全文】: {review.get('full', [])}")
+        print(f"    【问题N】: {review.get('question', [])}")
+        print(f"    【关键】: {review.get('critical', [])}")
+        if review.get("unlabeled"):
+            print(f"    未分类: {review.get('unlabeled', [])}")
+
+    plan_pool = interrupt_data.get("plan_pool")
+    if plan_pool:
+        print("  方案池（实现路径，测试后定夺）：")
+        for p in plan_pool:
+            print(
+                f"    - {p.get('id')} [{p.get('verdict', '')}] "
+                f"{p.get('title', '')}: {(p.get('description') or '')[:120]}"
+            )
+
     if "dynamic_ltm" in interrupt_data:
         ltm = interrupt_data["dynamic_ltm"]
         print(f"  目标: {ltm.get('objective', 'N/A')}")
-        print(f"  假设: {ltm.get('assumptions', [])}")
+        if not review:
+            print(f"  假设: {ltm.get('assumptions', [])}")
         print(f"  公式: {ltm.get('equations', [])}")
 
     if "artifacts_summary" in interrupt_data:
@@ -67,6 +86,11 @@ def _print_interrupt_info(interrupt_data: dict) -> None:
             print(f"  LLM 审查: {llm.get('verdict', 'N/A')} — {llm.get('summary', '')[:120]}")
             for issue in (llm.get("issues") or [])[:5]:
                 print(f"    [审查] {issue[:120]}")
+
+    assumptions_section = interrupt_data.get("assumptions_section")
+    if assumptions_section:
+        print("  ---- 3_assumptions.tex ----")
+        print("  " + assumptions_section[:2000].replace("\n", "\n  "))
 
     print("-" * 60)
 
@@ -126,8 +150,9 @@ def main() -> None:
         choices=["builtin", "codex", "human"],
         default=None,
         help=(
-            "编程手模式：builtin=内置 Coder；codex=调用本机 Codex CLI；"
-            "human=人工编程手（架构经人类审核后，人编写 solution.py）。"
+            "编程手模式（默认 human）：human=人工实现（人编写 solution.py 与可选 "
+            "figures.py，Coder/Drawer 任务均由人执行）；builtin=内置 Coder；"
+            "codex=调用本机 Codex CLI。"
         ),
     )
     parser.add_argument("--auto-approve", action="store_true", help="Auto-approve all HITL checkpoints (no pause).")

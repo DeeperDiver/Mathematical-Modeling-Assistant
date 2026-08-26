@@ -155,3 +155,25 @@ def test_parse_hitl_rewrite_vs_retry():
     assert _parse_hitl_decision("rewrite 重写摘要")["type"] == "rewrite"
     assert _parse_hitl_decision("retry v1.0")["type"] == "retry"
     assert _parse_hitl_decision("revise 修改模型")["type"] == "revise"
+
+
+def test_read_assumptions_section_missing_fallback(tmp_path):
+    """V20：假设章缺失时终审 HITL 辅助函数应安全降级。"""
+    from modeling_assistant.agents.nodes import _read_assumptions_section
+
+    text = _read_assumptions_section(tmp_path)
+    assert "未找到" in text
+
+
+def test_read_assumptions_section_reads_section_file(tmp_path):
+    """V20：应读取 paper/sections/3_assumptions.tex 内容供终审展示。"""
+    from modeling_assistant.agents.nodes import _read_assumptions_section
+
+    paper = tmp_path / "paper"
+    (paper / "sections").mkdir(parents=True)
+    (paper / "sections" / "3_assumptions.tex").write_text(
+        "\\section{模型假设}\n\\item 【全文】数据真实可靠\n", encoding="utf-8"
+    )
+    text = _read_assumptions_section(paper)
+    assert "模型假设" in text
+    assert "数据真实可靠" in text

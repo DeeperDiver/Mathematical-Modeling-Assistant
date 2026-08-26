@@ -539,7 +539,11 @@ def test_coder_node_backs_up_successful_results(tmp_path: Path, monkeypatch):
 
     # Mock runtime
     runtime = AgentRuntime.from_settings(
-        AppSettings(output_dir=output_dir, api_key_env="MISSING_KEY_FOR_TEST")
+        AppSettings(
+            output_dir=output_dir,
+            api_key_env="MISSING_KEY_FOR_TEST",
+            coder_external_mode="builtin",
+        )
     )
 
     # Mock invoke_structured 返回 CoderResponse
@@ -1321,6 +1325,315 @@ def test_clarifier_prompt_renders_problem_facts():
     assert "原文" in prompt
 
 
+def test_clarifier_prompt_has_assumption_tag_discipline():
+    """V20：Clarifier Prompt 应包含放置标签与【关键】规则，且无旧【关键假设】标记。"""
+    prompt = PromptCatalog().render(
+        "clarifier",
+        PromptContext(
+            static_ltm=StaticLTM(raw_problem="test"),
+            dynamic_ltm=DynamicLTM(),
+            control=ControlState(),
+        ),
+    )
+    assert "【全文】" in prompt
+    assert "【问题N】" in prompt
+    assert "【关键】" in prompt
+    assert "【关键假设】" not in prompt
+    assert "不得重复列出" in prompt
+
+
+def test_writer_prompt_has_assumption_placement_rules():
+    """V20：Writer Prompt 应包含模型假设写作规则（放置、条数、禁止细节）。"""
+    prompt = PromptCatalog().render(
+        "writer",
+        PromptContext(
+            static_ltm=StaticLTM(raw_problem="test"),
+            dynamic_ltm=DynamicLTM(objective="目标"),
+            control=ControlState(),
+        ),
+    )
+    assert "模型假设写作规则" in prompt
+    assert "3_assumptions.tex" in prompt
+    assert "不超过 6" in prompt
+    assert "【问题N】" in prompt
+    assert "【关键】" in prompt
+
+
+def test_architect_prompt_uses_critical_tag():
+    """V20：Architect Prompt 的关键假设实验规则应使用【关键】而非旧标记。"""
+    prompt = PromptCatalog().render(
+        "architect",
+        PromptContext(
+            static_ltm=StaticLTM(raw_problem="test"),
+            dynamic_ltm=DynamicLTM(objective="目标"),
+            control=ControlState(),
+        ),
+    )
+    assert "【关键】" in prompt
+    assert "【关键假设】" not in prompt
+    assert "扰动或对照实验" in prompt
+
+
+def test_milestone_reviewer_prompt_uses_placement_tags():
+    """V20：Milestone Reviewer 1 应检查放置标签与【关键】标注。"""
+    prompt = PromptCatalog().render(
+        "milestone_reviewer_1",
+        PromptContext(
+            static_ltm=StaticLTM(raw_problem="test"),
+            dynamic_ltm=DynamicLTM(),
+            control=ControlState(),
+        ),
+    )
+    assert "【全文】" in prompt
+    assert "【问题N】" in prompt
+    assert "【关键】" in prompt
+    assert "【关键假设】" not in prompt
+
+
+def test_final_reviewer_prompt_has_assumption_chapter_checks():
+    """V20：Final Reviewer Prompt 应含假设章硬检查且无旧【关键假设】标记。"""
+    prompt = PromptCatalog().render(
+        "final_reviewer",
+        PromptContext(
+            static_ltm=StaticLTM(raw_problem="test"),
+            dynamic_ltm=DynamicLTM(),
+            control=ControlState(),
+        ),
+    )
+    assert "假设章硬检查" in prompt
+    assert "【问题N】" in prompt
+    assert "【关键】" in prompt
+    assert "【关键假设】" not in prompt
+
+
+def test_final_reviewer_prompt_has_degenerate_solution_check():
+    """V21：终审应把主方案退化解判为硬问题，不能因「结果诚实」通过。"""
+    prompt = PromptCatalog().render(
+        "final_reviewer",
+        PromptContext(
+            static_ltm=StaticLTM(raw_problem="test"),
+            dynamic_ltm=DynamicLTM(),
+            control=ControlState(),
+        ),
+    )
+    assert "退化解硬检查" in prompt
+    assert "退化解" in prompt
+    assert "结果诚实" in prompt
+
+
+def test_final_reviewer_prompt_has_citation_and_person_hard_checks():
+    """V21：正文引用数为 0 与人称混用应升级为终审硬问题。"""
+    prompt = PromptCatalog().render(
+        "final_reviewer",
+        PromptContext(
+            static_ltm=StaticLTM(raw_problem="test"),
+            dynamic_ltm=DynamicLTM(),
+            control=ControlState(),
+        ),
+    )
+    assert "引用纪律" in prompt
+    assert "引用数为 0" in prompt
+    assert "人称与术语" in prompt
+    assert "我们" in prompt
+
+
+def test_style_injection_defaults_raise_writing_and_add_highlight():
+    """V21：句法规则注入强度升到 1.0；highlight 独立成层供 dropout。"""
+    from modeling_assistant.config.settings import AppSettings
+
+    injection = AppSettings().style_injection
+    assert injection["writing"] == 1.0
+    assert injection["structure"] == 1.0
+    assert injection["chart"] == 0.8
+    assert injection["highlight"] == 0.5
+
+
+def test_coder_external_mode_defaults_to_human():
+    """V22：默认 Coder/Drawer 任务由人工执行（human 模式，含 figures.py）。"""
+    from modeling_assistant.config.settings import AppSettings
+
+    assert AppSettings().coder_external_mode == "human"
+
+
+def test_method_knowledge_uses_hitl_confirmed_problem_type():
+    """V22：方法知识注入以 HITL 确认的题型为准，覆盖自动判定。"""
+    prompt = PromptCatalog().render(
+        "mathematician",
+        PromptContext(
+            static_ltm=StaticLTM(raw_problem="城市物流配送调度优化问题"),
+            dynamic_ltm=DynamicLTM(objective="目标"),
+            control=ControlState(problem_type="evaluation"),
+        ),
+    )
+    assert "evaluation" in prompt
+    assert "AHP" in prompt
+
+
+def test_mathematician_prompt_has_occam_rule():
+    """V21：Mathematician 应覆盖简单到复杂的完整谱系，奥卡姆只作评估规则。"""
+    prompt = PromptCatalog().render(
+        "mathematician",
+        PromptContext(
+            static_ltm=StaticLTM(raw_problem="test"),
+            dynamic_ltm=DynamicLTM(objective="目标"),
+            control=ControlState(),
+        ),
+    )
+    assert "奥卡姆原则" in prompt
+    assert "选更简单的那个" in prompt
+    assert "完整谱系" in prompt
+    assert "不在发散阶段自我审查" in prompt
+
+
+def test_mathematician_prompt_requires_more_plans():
+    """V23：Mathematician 每轮至少产出 5 个候选方案，支撑方案池。"""
+    prompt = PromptCatalog().render(
+        "mathematician",
+        PromptContext(
+            static_ltm=StaticLTM(raw_problem="test"),
+            dynamic_ltm=DynamicLTM(objective="目标"),
+            control=ControlState(),
+        ),
+    )
+    assert "至少 5 个" in prompt
+    assert "方案池" in prompt
+
+
+def test_clarifier_prompt_has_selected_plan():
+    """V23：Clarifier 应明确只围绕当前选定方案提炼 LTM。"""
+    prompt = PromptCatalog().render(
+        "clarifier",
+        PromptContext(
+            static_ltm=StaticLTM(raw_problem="test"),
+            dynamic_ltm=DynamicLTM(),
+            control=ControlState(selected_plan_id="plan_1"),
+        ),
+    )
+    assert "当前选定方案" in prompt
+    assert "忽略其他候选方案" in prompt
+    assert "selected_plan_json" not in prompt  # 占位符已被替换
+
+
+def test_realist_prompt_has_occam_rule():
+    """V21：Realist 评估时应惩罚无收益的过度复杂化。"""
+    prompt = PromptCatalog().render(
+        "realist",
+        PromptContext(
+            static_ltm=StaticLTM(raw_problem="test"),
+            control=ControlState(),
+        ),
+    )
+    assert "奥卡姆原则" in prompt
+    assert "复杂度未带来可解释性或结果改进" in prompt
+
+
+def test_architect_prompt_has_occam_rule():
+    """V21：Architect 设计方案时应拒绝无实质收益的复杂方法。"""
+    prompt = PromptCatalog().render(
+        "architect",
+        PromptContext(
+            static_ltm=StaticLTM(raw_problem="test"),
+            dynamic_ltm=DynamicLTM(objective="目标"),
+            control=ControlState(),
+        ),
+    )
+    assert "奥卡姆原则" in prompt
+    assert "不引入无实质收益的复杂方法" in prompt
+
+
+def test_architect_prompt_has_main_conclusion_figure_requirement():
+    """V21：Architect 每题必须规划至少 1 张主结论呈现图。"""
+    prompt = PromptCatalog().render(
+        "architect",
+        PromptContext(
+            static_ltm=StaticLTM(raw_problem="test"),
+            dynamic_ltm=DynamicLTM(objective="目标"),
+            control=ControlState(),
+        ),
+    )
+    assert "主结论呈现图" in prompt
+    assert "主结论呈现规则" in prompt
+    assert "一目了然" in prompt
+    assert "content_spec" in prompt
+
+
+def test_writer_prompt_has_main_conclusion_figure_requirement():
+    """V21：Writer 必须在该题主结论处引用主结论呈现图。"""
+    prompt = PromptCatalog().render(
+        "writer",
+        PromptContext(
+            static_ltm=StaticLTM(raw_problem="test"),
+            dynamic_ltm=DynamicLTM(objective="目标"),
+            control=ControlState(),
+        ),
+    )
+    assert "主结论呈现图" in prompt
+    assert "一目了然" in prompt
+
+
+def test_writer_prompt_has_language_discipline():
+    """V21：Writer 应包含四条可检查的语言纪律（结果先行/语气/人称/引用）。"""
+    prompt = PromptCatalog().render(
+        "writer",
+        PromptContext(
+            static_ltm=StaticLTM(raw_problem="test"),
+            dynamic_ltm=DynamicLTM(objective="目标"),
+            control=ControlState(),
+        ),
+    )
+    assert "语言纪律" in prompt
+    assert "结果先行" in prompt
+    assert "发现 + 对策" in prompt
+    assert "本文/本研究" in prompt
+    assert "引用纪律" in prompt
+
+
+def test_writer_prompt_has_abstract_and_restatement_skeleton():
+    """V21：摘要五段式与问题重述四小节骨架应写入模板层。"""
+    prompt = PromptCatalog().render(
+        "writer",
+        PromptContext(
+            static_ltm=StaticLTM(raw_problem="test"),
+            dynamic_ltm=DynamicLTM(objective="目标"),
+            control=ControlState(),
+        ),
+    )
+    assert "摘要固定五段式" in prompt
+    assert "本文创新性在于" in prompt
+    assert "1.1 问题背景" in prompt
+    assert "1.4 总体路线" in prompt
+
+
+def test_writer_prompt_has_expression_revision_checklist():
+    """V21：论文修订反馈应固定附加表达修订清单（人称/引用/长句/负结果/小结）。"""
+    prompt = PromptCatalog().render(
+        "writer",
+        PromptContext(
+            static_ltm=StaticLTM(raw_problem="test"),
+            dynamic_ltm=DynamicLTM(objective="目标"),
+            control=ControlState(),
+        ),
+    )
+    assert "表达修订清单" in prompt
+    assert "长句" in prompt
+    assert "小结" in prompt
+    assert "禁止只写" in prompt
+
+
+def test_writer_prompt_has_signature_moves_section():
+    """V21：Writer 应提供标志性句式骨架注入位（可套用骨架、禁止复制内容）。"""
+    prompt = PromptCatalog().render(
+        "writer",
+        PromptContext(
+            static_ltm=StaticLTM(raw_problem="test"),
+            dynamic_ltm=DynamicLTM(objective="目标"),
+            control=ControlState(),
+        ),
+    )
+    assert "标志性句式骨架" in prompt
+    assert "允许套用句法骨架" in prompt
+
+
 def test_coder_prompt_renders_problem_facts_and_parse_hints():
     """V11 第三层：Coder Prompt 应注入 problem_facts 和 data_parse_hints。"""
     prompt = PromptCatalog().render(
@@ -1527,6 +1840,24 @@ def test_parse_hitl_decision_supports_revise_and_auto():
     assert _parse_hitl_decision("revise 换用整数规划")["version"] == "换用整数规划"
     assert _parse_hitl_decision("auto")["type"] == "auto"
     assert _parse_hitl_decision("approve")["type"] == "approve"
+
+
+def test_parse_hitl_decision_set_problem_type():
+    """V22：题型确认支持 set <题型> 覆盖。"""
+    from modeling_assistant.agents.nodes import _parse_hitl_decision
+
+    d = _parse_hitl_decision("set evaluation")
+    assert d["type"] == "set"
+    assert d["version"] == "evaluation"
+
+
+def test_parse_hitl_decision_choose_plan():
+    """V23：方案池定夺支持 choose <plan_id> 改选方案。"""
+    from modeling_assistant.agents.nodes import _parse_hitl_decision
+
+    d = _parse_hitl_decision("choose plan_2")
+    assert d["type"] == "choose"
+    assert d["version"] == "plan_2"
 
 
 def test_route_after_architect_external_skips_review_after_approved():

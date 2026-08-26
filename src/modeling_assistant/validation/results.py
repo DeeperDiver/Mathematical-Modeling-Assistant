@@ -198,6 +198,99 @@ def _check_contract(
     return hard, warnings
 
 
+_IDENTIFIER_EXACT = {"id", "编号", "序号", "index", "name"}
+_IDENTIFIER_SUBSTRINGS = ("编号", "序号")
+
+
+def _is_identifier_col(name: str) -> bool:
+    """粗略识别 id/编号/序号 等标识列，不参与「答案列退化」判定。"""
+    text = str(name).strip()
+    lowered = text.lower()
+    return (
+        text in _IDENTIFIER_EXACT
+        or lowered.startswith("id_")
+        or lowered.endswith("_id")
+        or any(k in text for k in _IDENTIFIER_SUBSTRINGS)
+    )
+
+
+def _check_degenerate_solution(
+    df: pd.DataFrame,
+    contract: ResultContract | None,
+) -> list[str]:
+    """V21 退化解硬门槛：主方案结果退化必须判 fail，不能以「结果诚实」通过。
+
+    退化解判定（多行结果）：
+    - 整表塌缩：所有行完全相同（drop_duplicates 后只剩一行）；
+    - 答案列塌缩：契约中所有数值答案列均为常量（每个样本/分组给出相同答案）；
+    - 边界塌缩：契约数值答案列全部取值落在声明的 min 或 max 边界
+      （所有分组的最优值都是边界值）。
+    单行标量答案（allow_single_row）不算退化；无契约时的常量列/单行
+    仍由旧通用启发式拒绝。
+    """
+    issues: list[str] = []
+    if len(df) <= 1:
+        return issues
+
+    if df.drop_duplicates().shape[0] <= 1:
+        issues.append(
+            "退化解：结果所有行完全相同（主方案塌缩为平凡解），必须判 fail。"
+        )
+
+    if contract is None or not contract.columns:
+        return issues
+
+    answer_cols = [
+        spec.name
+        for spec in contract.columns
+        if (
+            spec.dtype in ("int", "float")
+            and spec.name in df.columns
+            and pd.api.types.is_numeric_dtype(df[spec.name])
+            and not _is_identifier_col(spec.name)
+        )
+    ]
+    if answer_cols and all(
+        df[c].nunique(dropna=True) <= 1 for c in answer_cols
+    ):
+        issues.append(
+            f"退化解：主方案所有数值答案列均为常量（{answer_cols}），"
+            "所有样本/分组给出相同结果，必须判 fail。"
+        )
+
+    for spec in contract.columns:
+        if (
+            spec.name not in df.columns
+            or spec.dtype not in ("int", "float")
+            or (spec.min is None and spec.max is None)
+            or _is_identifier_col(spec.name)
+        ):
+            continue
+        col = df[spec.name]
+        if not pd.api.types.is_numeric_dtype(col):
+            continue
+        numeric = pd.to_numeric(col, errors="coerce").dropna()
+        if numeric.empty:
+            continue
+        at_min = spec.min is not None and all(
+            abs(float(v) - float(spec.min)) <= 1e-6 for v in numeric
+        )
+        at_max = spec.max is not None and all(
+            abs(float(v) - float(spec.max)) <= 1e-6 for v in numeric
+        )
+        if at_min or at_max:
+            sides = []
+            if at_min:
+                sides.append(f"min={spec.min:g}")
+            if at_max:
+                sides.append(f"max={spec.max:g}")
+            issues.append(
+                f"退化解：列 '{spec.name}' 全部取值落在契约边界"
+                f"（{'、'.join(sides)}），所有分组的最优值都是边界值，必须判 fail。"
+            )
+    return issues
+
+
 def validate_result(
     result_path: str | Path,
     contract: ResultContract | None = None,
@@ -237,6 +330,8 @@ def validate_result(
     else:
         # NaN/Inf 无论是否有契约都是硬性问题
         hard_issues.extend(_check_nan_inf(df))
+        # V21：退化解硬门槛（多行塌缩/常量答案/全边界）
+        hard_issues.extend(_check_degenerate_solution(df, contract))
         if _contract_active(contract):
             contract_hard, contract_warnings = _check_contract(df, contract)
             hard_issues.extend(contract_hard)

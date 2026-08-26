@@ -157,8 +157,13 @@ def search_exemplars(
     runtime: Any | None = None,
     problem_understanding: str = "",
     contest: str = "",
+    problem_type: str | None = None,
 ) -> ExemplarContext:
-    """加载知识库 → 题型判定 → 候选筛选 → 相关性阈值 → 注入包。"""
+    """加载知识库 → 题型判定（可跳过）→ 候选筛选 → 相关性阈值 → 注入包。
+
+    problem_type 由 exemplar_loader 的 HITL 确认后传入；为空时按
+    judge_problem_type 自动判定（向后兼容）。
+    """
     exemplars_dir = Path(settings.exemplars_dir)
     profile = load_global_profile(exemplars_dir / "profile.yaml")
     cards = load_cards(exemplars_dir / "cards")
@@ -170,10 +175,13 @@ def search_exemplars(
             return ExemplarContext(profile=profile)
         return ExemplarContext()
 
-    problem_type, _conf = judge_problem_type(
-        problem_text, runtime=runtime, problem_understanding=problem_understanding
-    )
-    candidates = [c for c in cards if c.problem_type == problem_type]
+    if problem_type:
+        resolved_type = problem_type
+    else:
+        resolved_type, _conf = judge_problem_type(
+            problem_text, runtime=runtime, problem_understanding=problem_understanding
+        )
+    candidates = [c for c in cards if c.problem_type == resolved_type]
     if not candidates:
         return ExemplarContext()
 
@@ -200,7 +208,7 @@ def search_exemplars(
             "Exemplar 主题相关性 %.3f 低于阈值 %.3f，按题型注入兜底（题型=%s）",
             relevance,
             settings.exemplar_min_relevance,
-            problem_type,
+            resolved_type,
         )
 
     # 注入多样性：同一题号（YYYY_T）的论文风格相近，优先保证不同题号，
@@ -221,8 +229,8 @@ def search_exemplars(
             if c.id not in seen:
                 top.append(c)
                 seen.add(c.id)
-    guide = _pick_guide(guides, problem_type, contest)
-    craft = next((g for g in craft_guides if g.problem_type == problem_type), None)
+    guide = _pick_guide(guides, resolved_type, contest)
+    craft = next((g for g in craft_guides if g.problem_type == resolved_type), None)
     context = ExemplarContext(
         active=True,
         guide=guide,
@@ -233,7 +241,7 @@ def search_exemplars(
     )
     logger.info(
         "Exemplar 命中：题型=%s，注入 %d 张卡片，相关性=%.3f，指南=%s，全局偏好=%s",
-        problem_type,
+        resolved_type,
         len(top),
         relevance,
         guide.problem_type if guide else "无",
@@ -266,6 +274,7 @@ def load_exemplar_context(
     *,
     runtime: Any | None = None,
     problem_understanding: str = "",
+    problem_type: str | None = None,
 ) -> ExemplarContext:
     """供 exemplar_loader_node 调用的入口。"""
     return search_exemplars(
@@ -273,4 +282,5 @@ def load_exemplar_context(
         settings=settings,
         runtime=runtime,
         problem_understanding=problem_understanding,
+        problem_type=problem_type,
     )

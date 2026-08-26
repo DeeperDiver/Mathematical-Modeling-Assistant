@@ -22,6 +22,18 @@ class WritingExample(BaseModel):
     note: str = ""  # 这句在行文中起什么作用
 
 
+class SignatureMove(BaseModel):
+    """标志性句式骨架：带可替换空位的高分句式。
+
+    只存句法骨架（可替换位置用 `__` 标注），不存具体题目内容/数值，
+    保证「允许套用句法骨架、禁止复制具体内容」的防抄袭口径可执行。
+    """
+
+    name: str  # 句式名称：结果句式/创新点句式/模型评价句式…
+    skeleton: str  # 句法骨架，如"结果表明：随__单调上升，呈__关系"
+    note: str = ""  # 适用场景与注意事项
+
+
 class DerivationPattern(BaseModel):
     """数学推导安排。"""
 
@@ -101,6 +113,7 @@ class WritingCraft(BaseModel):
     algorithm: list[AlgorithmPattern] = Field(default_factory=list)
     interpretation: list[InterpretationPattern] = Field(default_factory=list)
     writing: list[WritingPattern] = Field(default_factory=list)
+    signature_moves: list[SignatureMove] = Field(default_factory=list)
     figure_placements: list[FigurePlacement] = Field(default_factory=list)
     section_focuses: list[SectionFocus] = Field(default_factory=list)
     argument_flow: ArgumentFlow | None = None
@@ -115,6 +128,7 @@ class CraftGuide(BaseModel):
     algorithm_common: list[AlgorithmPattern] = Field(default_factory=list)
     interpretation_common: list[InterpretationPattern] = Field(default_factory=list)
     writing_common: list[WritingPattern] = Field(default_factory=list)
+    signature_moves_common: list[SignatureMove] = Field(default_factory=list)
     figure_placement_common: list[FigurePlacement] = Field(default_factory=list)
     section_focus_common: list[SectionFocus] = Field(default_factory=list)
     argument_flow_common: ArgumentFlow | None = None

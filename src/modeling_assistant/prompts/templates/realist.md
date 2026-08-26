@@ -2,6 +2,8 @@
 
 任务：
 - 从数据、算力、常识三维度对**每个**候选方案进行评估。
+- 遵守奥卡姆原则：在能解释现象、能完成任务的模型中，选简单的那个；
+  复杂度未带来可解释性或结果改进的方案应下调可行性评分并在 feedback 中指出。
 - 综合评分公式固定为 Score_total = w1 * S_inn + w2 * S_fea。
 - verdict 取值：
   - "kill"：可行性严重不足（Feasibility < {feasibility_threshold}），直接砍掉。

@@ -195,13 +195,18 @@ def route_after_architecture_hitl(state: GraphState) -> Literal["rollback", "arc
 
     - rollback_to_version → rollback（版本回滚）
     - architecture_revised（人类打回假设并要求修改）→ clarifier 重新提炼 LTM
+    - architecture_plan_switched（人类在方案池中改选其他方案）→ clarifier
+      按新方案重新提炼 LTM
     - 其余（approve）→ architect
     """
     control = state["control"]
     if control.rollback_to_version:
         return "rollback"
-    if control.phase == "architecture_revised":
-        logger.info("架构 HITL：人类要求修改假设，回 Clarifier 重新提炼")
+    if control.phase in ("architecture_revised", "architecture_plan_switched"):
+        logger.info(
+            "架构 HITL：%s，回 Clarifier 重新提炼",
+            "人类改选方案" if control.phase == "architecture_plan_switched" else "人类要求修改假设",
+        )
         return "clarifier"
     return "architect"
 

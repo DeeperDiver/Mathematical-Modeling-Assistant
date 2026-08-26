@@ -467,6 +467,10 @@ class AuthoritativeResult(BaseModel):
 
 class ControlState(BaseModel):
     phase: str = "init"
+    # V22 题型判定：exemplar_loader 判定并经 HITL 确认后写入，
+    # 供方法知识注入与示例检索使用（确认前为空字符串）
+    problem_type: str = ""
+    problem_type_confidence: float = 0.0
     debate_round: int = 0
     max_debate_rounds: int = 3
     innovation_threshold: int = 60
@@ -475,6 +479,10 @@ class ControlState(BaseModel):
     feasibility_weight: float = 0.5
     top_k_plans: list[PlanCandidate] = Field(default_factory=list)
     selected_plan_id: str | None = None
+    # V23 方案池：Realist 剪枝后保留评分最高的前 N 个 keep 方案 id，
+    # 供架构 HITL 呈现各自实现路径，由人类测试后定夺
+    plan_pool_ids: list[str] = Field(default_factory=list)
+    plan_pool_size: int = 3
     innovation_score: int = Field(default=0, ge=0, le=100)
     feasibility_score: int = Field(default=0, ge=0, le=100)
     need_rebrainstorm: bool = False
@@ -625,7 +633,12 @@ class ExemplarContext(BaseModel):
     profile: GlobalStyleProfile | None = None  # L3 全局偏好
     craft: CraftGuide | None = None  # 行文技艺指南（题型级，深加工层）
     injection: dict[str, bool] = Field(
-        default_factory=lambda: {"structure": True, "chart": True, "writing": True}
+        default_factory=lambda: {
+            "structure": True,
+            "chart": True,
+            "writing": True,
+            "highlight": True,
+        }
     )
 
 

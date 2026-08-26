@@ -15,6 +15,7 @@ from modeling_assistant.schemas.craft import (
     FigurePlacement,
     InterpretationPattern,
     SectionFocus,
+    SignatureMove,
     WritingCraft,
     WritingExample,
     WritingPattern,
@@ -85,6 +86,13 @@ def _make_craft(card_id: str, section: str = "模型建立") -> WritingCraft:
             steps=["问题重述", "模型假设", "模型建立", "模型求解"],
             transitions=["由问题提出假设"],
         ),
+        signature_moves=[
+            SignatureMove(
+                name="结果句式",
+                skeleton="结果表明：随__单调上升，呈__关系",
+                note="给出关键结论时使用",
+            )
+        ],
     )
 
 
@@ -103,6 +111,8 @@ def test_aggregate_craft_guides_groups_by_type():
     assert len(g.derivation_common) == 1
     assert len(g.algorithm_common) == 1
     assert len(g.writing_common) == 1
+    assert len(g.signature_moves_common) == 1
+    assert "随__单调上升" in g.signature_moves_common[0].skeleton
     assert len(g.figure_placement_common) == 1
     assert len(g.section_focus_common) == 1
     assert g.argument_flow_common is not None
@@ -155,11 +165,19 @@ def test_craft_injected_into_templates():
                 )
             ],
             argument_flow_common=ArgumentFlow(steps=["问题", "模型", "求解"], transitions=["由问题引出模型"]),
+            signature_moves_common=[
+                SignatureMove(
+                    name="创新点句式",
+                    skeleton="本文创新性在于：一是__；二是__；三是__",
+                )
+            ],
         ),
         injection={"structure": True, "chart": True, "writing": True},
     )
     catalog = PromptCatalog()
     assert "行文技艺参考" in catalog.render("writer", PromptContext(exemplars=ctx))
+    assert "标志性句式骨架" in catalog.render("writer", PromptContext(exemplars=ctx))
+    assert "本文创新性在于：一是__" in catalog.render("writer", PromptContext(exemplars=ctx))
     assert "图片位置规划参考" in catalog.render("drawer", PromptContext(exemplars=ctx))
     assert "正文侧重点与论证链条参考" in catalog.render("architect", PromptContext(exemplars=ctx))
 

@@ -40,6 +40,10 @@ def test_load_norm_sections_finds_key_sections():
         "假设与模型建立",
         "编码阶段常见错误",
         "图表与可视化",
+        "论文写作",
+        "论文写作规范补充",
+        "论文验收与一致性",
+        "决策/分组/分段类问题",
         "优化类模型详细指南",
         "评价类模型详细指南",
     ):
@@ -69,6 +73,19 @@ def test_get_node_knowledge_returns_node_specific_sections():
     chart = get_node_knowledge("chart")
     assert "图表" in chart
 
+    writing = get_node_knowledge("writing")
+    assert "摘要" in writing
+    assert "灵敏度" in writing
+    assert "硬错误" in writing
+
+    model_selection = get_node_knowledge("model_selection")
+    assert "决策变量" in model_selection
+    assert "目标函数" in model_selection
+
+    assumptions = get_node_knowledge("assumptions")
+    assert "分组/分段质量度量" in assumptions
+    assert "约束" in assumptions
+
 
 def test_build_knowledge_payload_contains_all_injection_keys():
     """知识包应包含全部注入键，且 active 标志正确。"""
@@ -81,6 +98,7 @@ def test_build_knowledge_payload_contains_all_injection_keys():
         "assumption_knowledge",
         "coding_knowledge",
         "chart_knowledge",
+        "writing_knowledge",
     ):
         assert payload[key], f"知识包字段为空: {key}"
 
@@ -106,6 +124,15 @@ def test_prompt_catalog_renders_method_knowledge_when_enabled():
 
     drawer = catalog.render("drawer", state)
     assert "图表与可视化规范" in drawer
+
+    writer = catalog.render("writer", state)
+    assert "论文写作规范" in writer
+    assert "摘要写作要点" in writer
+
+    final_reviewer = catalog.render("final_reviewer", state)
+    assert "论文写作与验收规范" in final_reviewer
+    assert "验收应先识别项目实际布局" in final_reviewer
+    assert "硬错误包括" in final_reviewer
 
 
 def test_prompt_catalog_renders_without_knowledge_when_disabled():

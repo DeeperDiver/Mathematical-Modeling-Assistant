@@ -5,6 +5,9 @@ figure_preferences:
   - 优先使用箱线图与散点图
   - 图表风格简洁，避免 3D 装饰
 writing_preferences:
+  result_first: 结论先行：每个主结论先给关键数字/结果，再给解释
+  paragraph_structure: 段落先总后分
+  tone: 避免自我辩护语气；负结果用「发现 + 对策」表述
   detail_level: 公式与文字解释并重
   tense: 一般现在时
 notes: 默认空偏好；填写后将作为最上层软约束注入 Drawer/Writer。

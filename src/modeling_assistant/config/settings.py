@@ -45,17 +45,24 @@ class AppSettings(BaseModel):
     exemplar_min_relevance: float = 0.25  # TF-IDF/标签相关性阈值，低于则不注入
     exemplar_top_k: int = 2  # 每次注入的最多卡片数
     style_injection: dict[str, float] = Field(
-        default_factory=lambda: {"structure": 1.0, "chart": 0.8, "writing": 0.5}
+        default_factory=lambda: {
+            "structure": 1.0,
+            "chart": 0.8,
+            "writing": 1.0,
+            "highlight": 0.5,
+        }
     )  # 注入强度分级
-    style_dropout_rate: float = 0.3  # writing 卡片的随机丢弃率（防依赖）
+    style_dropout_rate: float = 0.3  # 图表风格/亮点卡片的随机丢弃率（防同质化）；句法规则不参与 dropout
     plagiarism_ngram: int = 8  # 查重护栏 n-gram 长度
     plagiarism_threshold: float = 0.15  # 重合率阈值，超过写入完整性警告
     feedback_alpha: float = 0.3  # 反馈回写滑动平均系数
     # V13 新增：编程手模式
-    # - builtin：主流程内置 Coder 生成代码（默认）
+    # - human：人工编程手（默认）——架构经人类审核后，人编写 solution.py 与
+    #   可选 figures.py；Coder 与 Drawer 的任务都由人来执行
+    # - builtin：主流程内置 Coder 生成代码
     # - codex：把"方案与实现架构说明书"打包后，调用本机 Codex CLI
     #   让另一个 AI 实例实现代码，主流程继续执行与验证
-    coder_external_mode: str = "builtin"
+    coder_external_mode: str = "human"
     coder_external_timeout: int = 600  # 外部编程手单次实现超时（秒）
     # V15 新增：方法知识库（method knowledge）
     # 从 references/math_modeling_norms.md 按节点/题型切片注入
@@ -94,7 +101,7 @@ class AppSettings(BaseModel):
             "meta_router": 4096,
             "searcher": 2048,
             "exemplar_type_judge": 2048,
-            "load_bearing_analyzer": 8192,
+            "load_bearing_analyzer": 16384,
         }
     )
 
@@ -221,7 +228,12 @@ def load_settings(env_file: str | Path = ".env", **overrides: Any) -> AppSetting
             values["style_injection"] = json.loads(values["style_injection"])
         except json.JSONDecodeError:
             # 配置损坏时回退默认值
-            values["style_injection"] = {"structure": 1.0, "chart": 0.8, "writing": 0.5}
+            values["style_injection"] = {
+                "structure": 1.0,
+                "chart": 0.8,
+                "writing": 1.0,
+                "highlight": 0.5,
+            }
     if "llm_max_tokens_overrides" in values:
         try:
             values["llm_max_tokens_overrides"] = json.loads(

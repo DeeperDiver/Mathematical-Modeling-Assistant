@@ -17,6 +17,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from modeling_assistant.validation.assumption_tags import has_question_tag
+
 logger = logging.getLogger(__name__)
 
 # 占位符（硬错误）
@@ -56,6 +58,9 @@ _EXPERIMENT_KEYWORDS = {
 }
 _ANCHOR_KEYWORDS = ("锚点", "分区", "示意", "可视化", "绑定")
 _FALLBACK_KEYWORDS = ("兜底", "边界", "对照", "案例", "极端", "反例", "翻转")
+
+# V20 假设章硬规则：3_assumptions.tex 只写【全文】假设，条数上限 6
+ASSUMPTION_MAX_ITEMS = 6
 
 
 def _read_text(path: Path) -> str:
@@ -127,6 +132,34 @@ def _check_problem_summaries(sections_dir: Path) -> list[str]:
                 "\\subsection{问题小结}，写清「本题做了什么 → 得到什么 → 对下一题的支撑」。"
             )
     return issues
+
+
+def _check_assumptions_section(sections_dir: Path) -> list[str]:
+    """3_assumptions.tex 机械检查（硬错误，V20）。
+
+    - 条目数（\\item）超过 6 条；
+    - 任何条目带【问题N】标签（技术设定混入全文假设章）。
+    语义检查（全文假设是否被正文引用、关键假设是否有验证）由 final_reviewer
+    的 LLM 审查完成。
+    """
+    issues: list[str] = []
+    path = sections_dir / "3_assumptions.tex"
+    if not path.exists():
+        return issues
+    text = _read_text(path)
+    items = re.findall(r"\\item\s*(.*)", text)
+    if len(items) > ASSUMPTION_MAX_ITEMS:
+        issues.append(
+            f"3_assumptions.tex：全文假设共 {len(items)} 条，"
+            f"超过上限 {ASSUMPTION_MAX_ITEMS} 条"
+        )
+    for item in items:
+        if has_question_tag(item):
+            snippet = " ".join(item.split())[:60]
+            issues.append(
+                f"3_assumptions.tex：问题假设被错误写入全文假设章：{snippet}"
+            )
+    return issues[:20]
 
 
 def _check_image_references(main_tex: Path, sections_dir: Path, paper_dir: Path) -> list[str]:
@@ -609,6 +642,14 @@ def check_paper(
         warnings.extend(lb_warnings)
     else:
         checks["承重契约"] = "跳过（未提供承重图）"
+
+    # 3.6 假设章（V20）：全文假设 ≤6 条、不得混入【问题N】技术设定
+    assumption_issues = _check_assumptions_section(sections_dir)
+    if assumption_issues:
+        checks["假设章"] = f"{len(assumption_issues)} 处违规"
+        issues.extend(assumption_issues)
+    else:
+        checks["假设章"] = "通过"
 
     # 4. 编译
     if compile_pdf and main_tex.exists():

@@ -19,6 +19,7 @@ from modeling_assistant.schemas.craft import (
     FigurePlacement,
     InterpretationPattern,
     SectionFocus,
+    SignatureMove,
     WritingCraft,
     WritingExample,
     WritingPattern,
@@ -215,6 +216,28 @@ def _aggregate_group(ptype: str, group: list[WritingCraft], min_occ: int) -> Cra
     func_order = ["摘要句子", "假设铺垫句", "过渡衔接句", "结果解读句", "结论升华句", "局限说明句"]
     writing_common.sort(key=lambda w: func_order.index(w.function) if w.function in func_order else 99)
 
+    # ── 标志性句式：按骨架去重聚类，只保留共有骨架 ──
+    move_groups: dict[str, list[SignatureMove]] = defaultdict(list)
+    for c in group:
+        for m in c.signature_moves:
+            move_groups[m.skeleton.strip() or "其他"].append(m)
+    signature_moves_common: list[SignatureMove] = []
+    for skeleton, items in sorted(
+        move_groups.items(), key=lambda kv: len(kv[1]), reverse=True
+    ):
+        if len(items) < threshold:
+            continue
+        name_counter: Counter[str] = Counter(m.name for m in items if m.name)
+        note_counter: Counter[str] = Counter(m.note for m in items if m.note)
+        signature_moves_common.append(
+            SignatureMove(
+                name=_top_values(name_counter, 1)[0] if name_counter else "标志性句式",
+                skeleton=skeleton,
+                note=_top_values(note_counter, 1)[0] if note_counter else "",
+            )
+        )
+    signature_moves_common = signature_moves_common[:6]
+
     # ── 图片位置规划：按 (图类型, 章节) 聚类 ──
     fig_groups: dict[tuple[str, str], list[FigurePlacement]] = defaultdict(list)
     for c in group:
@@ -280,6 +303,7 @@ def _aggregate_group(ptype: str, group: list[WritingCraft], min_occ: int) -> Cra
         algorithm_common=algorithm_common,
         interpretation_common=interpretation_common,
         writing_common=writing_common,
+        signature_moves_common=signature_moves_common,
         figure_placement_common=figure_placement_common,
         section_focus_common=section_focus_common,
         argument_flow_common=argument_flow_common,

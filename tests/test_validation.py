@@ -15,6 +15,57 @@ def test_validate_clean_ltm_passes():
     assert errors == []
 
 
+def test_classify_assumptions_groups_by_tags():
+    """V20：按【全文】/【问题N】/【关键】分组假设，未标签假设进 unlabeled。"""
+    from modeling_assistant.validation.assumption_tags import classify_assumptions
+
+    result = classify_assumptions(
+        [
+            "【全文】题目所给数据真实可靠（原文：...）",
+            "【问题1】男胎 Y 染色体浓度取值于(0,1)，在 logit 尺度建模（原文：...）",
+            "【问题3】【关键】约束风险最小化在单调条件下等价于首穿时点"
+            "（依据：...；风险：...；可验证性：...）",
+            "没有标签的假设",
+        ]
+    )
+    assert result["full"] == ["【全文】题目所给数据真实可靠（原文：...）"]
+    # 【问题3】【关键】同时属于「问题」与「关键」两组
+    assert len(result["question"]) == 2
+    assert "【问题1】" in result["question"][0]
+    assert "【问题3】【关键】" in result["question"][1]
+    # 关键假设同时出现在 critical 分组
+    assert len(result["critical"]) == 1
+    assert "【问题3】【关键】" in result["critical"][0]
+    assert result["unlabeled"] == ["没有标签的假设"]
+
+
+def test_classify_assumptions_critical_full_in_both_groups():
+    """V20：【全文】【关键】假设应同时出现在 full 与 critical 分组。"""
+    from modeling_assistant.validation.assumption_tags import classify_assumptions
+
+    result = classify_assumptions(
+        ["【全文】【关键】系统在短期内处于稳定状态（依据：...；可验证性：...）"]
+    )
+    assert len(result["full"]) == 1
+    assert len(result["critical"]) == 1
+    assert result["question"] == []
+    assert result["unlabeled"] == []
+
+
+def test_question_tag_helpers():
+    """V20：has_question_tag / question_index 兼容空白并区分全文标签。"""
+    from modeling_assistant.validation.assumption_tags import (
+        has_question_tag,
+        question_index,
+    )
+
+    assert has_question_tag("【问题2】xxx")
+    assert has_question_tag("【问题 2】xxx")
+    assert not has_question_tag("【全文】xxx")
+    assert question_index("【问题2】xxx") == 2
+    assert question_index("【全文】xxx") is None
+
+
 def test_validate_undefined_symbol_in_equation():
     """公式闭环校验已移除：公式引用未定义符号不再报错。
 
@@ -190,3 +241,62 @@ def test_validate_result_legacy_behavior_without_contract():
     report = validate_result(path)
     assert not report["passed"]
     assert any("只有一行" in issue for issue in report["issues"])
+
+
+def test_validate_result_rejects_all_constant_answer_columns():
+    """V21：多行结果中所有数值答案列均为常量 → 退化解，必须判 fail。"""
+    from modeling_assistant.schemas.responses import ResultColumnSpec, ResultContract
+    from modeling_assistant.validation.results import validate_result
+
+    path = _write_csv(None, "id,optimal_week\n1,10.0\n2,10.0\n3,10.0\n")
+    contract = ResultContract(
+        columns=[
+            ResultColumnSpec(name="id", dtype="int"),
+            ResultColumnSpec(name="optimal_week", dtype="float", min=0.0, max=40.0),
+        ]
+    )
+    report = validate_result(path, contract=contract)
+    assert not report["passed"]
+    assert any("退化解" in issue and "常量" in issue for issue in report["issues"])
+
+
+def test_validate_result_rejects_boundary_collapse():
+    """V21：多行结果最优值全部落在契约边界 → 退化解，必须判 fail。"""
+    from modeling_assistant.schemas.responses import ResultColumnSpec, ResultContract
+    from modeling_assistant.validation.results import validate_result
+
+    path = _write_csv(None, "group,optimal_week\nA,40.0\nB,40.0\nC,40.0\n")
+    contract = ResultContract(
+        columns=[
+            ResultColumnSpec(name="group", dtype="category"),
+            ResultColumnSpec(name="optimal_week", dtype="float", min=0.0, max=40.0),
+        ]
+    )
+    report = validate_result(path, contract=contract)
+    assert not report["passed"]
+    assert any("退化解" in issue and "边界" in issue for issue in report["issues"])
+
+
+def test_validate_result_rejects_duplicate_rows_without_contract():
+    """V21：无契约时整表行完全相同 → 退化解，必须判 fail。"""
+    from modeling_assistant.validation.results import validate_result
+
+    path = _write_csv(None, "a,b\n1.0,2.0\n1.0,2.0\n1.0,2.0\n")
+    report = validate_result(path)
+    assert not report["passed"]
+    assert any("退化解" in issue and "行完全相同" in issue for issue in report["issues"])
+
+
+def test_validate_result_allows_single_row_scalar_at_boundary():
+    """V21：单行标量答案落在边界值不算退化（allow_single_row 放行）。"""
+    from modeling_assistant.schemas.responses import ResultColumnSpec, ResultContract
+    from modeling_assistant.validation.results import validate_result
+
+    path = _write_csv(None, "answer\n40.0\n")
+    contract = ResultContract(
+        description="最优检测时点（周）",
+        allow_single_row=True,
+        columns=[ResultColumnSpec(name="answer", dtype="float", min=0.0, max=40.0)],
+    )
+    report = validate_result(path, contract=contract)
+    assert report["passed"], f"单行标量答案不应判退化：{report['issues']}"

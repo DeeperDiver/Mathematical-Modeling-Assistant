@@ -6,6 +6,7 @@ from pathlib import Path
 
 from modeling_assistant.validation.paper_check import (
     check_paper,
+    _check_assumptions_section,
     _check_malformed_image_commands,
     _check_front_matter_placeholders,
     _check_problem_summaries,
@@ -264,3 +265,74 @@ def test_check_paper_handles_missing_paper_dir(tmp_path):
     report = check_paper(tmp_path / "no_such_paper")
     assert not report["passed"]
     assert report["checks"]["入口"] == "缺失"
+
+
+def _write_assumptions(paper: Path, items: list[str]) -> None:
+    """写入 3_assumptions.tex（enumerate + \\item 列表）。"""
+    (paper / "sections" / "3_assumptions.tex").write_text(
+        "\\section{模型假设}\n为简化问题，本文做出以下基本假设：\n"
+        "\\begin{enumerate}\n"
+        + "".join(f"  \\item {item}\n" for item in items)
+        + "\\end{enumerate}\n",
+        encoding="utf-8",
+    )
+
+
+def test_check_assumptions_section_fails_when_too_many(tmp_path):
+    """V20：3_assumptions.tex 超过 6 条假设 → 硬错误。"""
+    paper = _make_paper(tmp_path)
+    _write_assumptions(paper, [f"【全文】假设{i}" for i in range(7)])
+    issues = _check_assumptions_section(paper / "sections")
+    assert len(issues) == 1
+    assert "3_assumptions.tex" in issues[0]
+    assert "超过上限" in issues[0]
+
+
+def test_check_assumptions_section_fails_on_question_tag(tmp_path):
+    """V20：【问题N】假设混入全文假设章 → 硬错误。"""
+    paper = _make_paper(tmp_path)
+    _write_assumptions(
+        paper,
+        ["【全文】题目所给数据真实可靠", "【问题1】浓度取值于(0,1)，在 logit 尺度建模"],
+    )
+    issues = _check_assumptions_section(paper / "sections")
+    assert len(issues) == 1
+    assert "问题假设被错误写入全文假设章" in issues[0]
+
+
+def test_check_assumptions_section_passes_clean(tmp_path):
+    """V20：≤6 条且无【问题N】标签的假设章通过。"""
+    paper = _make_paper(tmp_path)
+    _write_assumptions(
+        paper,
+        ["【全文】题目所给数据真实可靠", "【全文】系统在短期内处于稳定状态"],
+    )
+    assert _check_assumptions_section(paper / "sections") == []
+
+
+def test_check_assumptions_section_missing_file_no_issue(tmp_path):
+    """V20：假设章文件缺失时不误报（由章节存在性检查负责）。"""
+    paper = _make_paper(tmp_path)
+    assert _check_assumptions_section(paper / "sections") == []
+
+
+def test_check_paper_fails_on_assumptions_overflow(tmp_path):
+    """V20：check_paper 应将假设章违规记为硬错误并写入报告。"""
+    paper = _make_paper(tmp_path)
+    _write_assumptions(paper, [f"【全文】假设{i}" for i in range(7)])
+    report = check_paper(paper, compile_pdf=False)
+    assert not report["passed"]
+    assert report["checks"]["假设章"] != "通过"
+    assert any("3_assumptions.tex" in i for i in report["issues"])
+
+
+def test_check_paper_passes_clean_assumptions(tmp_path):
+    """V20：干净假设章不阻塞论文验收。"""
+    paper = _make_paper(tmp_path)
+    _write_assumptions(
+        paper,
+        ["【全文】题目所给数据真实可靠", "【全文】系统在短期内处于稳定状态"],
+    )
+    report = check_paper(paper, compile_pdf=False)
+    assert report["passed"]
+    assert report["checks"]["假设章"] == "通过"

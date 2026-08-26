@@ -5,7 +5,7 @@ P0 优化：把 MathModelAgent 的 `math_modeling_norms.md` 规范知识库引�
 设计原则（与 Exemplar Learning System 一致）：
 - 单一知识源：规范原文位于 `references/math_modeling_norms.md`，本模块运行时解析，
   不硬编码大段文本；规范更新后重启即生效。
-- 按节点切片：每个下游节点只拿到与自身职责相关的小节（选型/假设/编码/图表）。
+- 按节点切片：每个下游节点只拿到与自身职责相关的小节（选型/假设/编码/图表/写作）。
 - 按题型切片：Mathematician/Realist/Coder 额外拿到当前题型（optimization/physics/
   forecasting/evaluation/data_mining）的专属指南与防错。
 - 优雅降级：文件缺失或解析失败时返回空知识，prompt 渲染与旧行为完全一致。
@@ -40,10 +40,11 @@ _TYPE_GUIDE_SECTIONS: dict[str, list[str]] = {
 
 # ── 节点 → 通用小节（与题型无关的领域规范）─────────────────────────
 _NODE_SECTIONS: dict[str, list[str]] = {
-    "model_selection": ["模型大分类与选型速查", "题型防错速查"],
-    "assumptions": ["假设与模型建立"],
+    "model_selection": ["模型大分类与选型速查", "题型防错速查", "决策/分组/分段类问题"],
+    "assumptions": ["假设与模型建立", "决策/分组/分段类问题"],
     "coding": ["代码实现与结果", "编码阶段常见错误"],
     "chart": ["图表与可视化"],
+    "writing": ["论文写作", "论文写作规范补充", "论文验收与一致性"],
 }
 
 # 无题型专属指南时的兜底小节
@@ -93,7 +94,7 @@ def _join_sections(sections: dict[str, str], names: list[str]) -> str:
 
 
 def get_node_knowledge(node: str) -> str:
-    """返回指定节点（model_selection / assumptions / coding / chart）的通用规范文本。"""
+    """返回指定节点（model_selection / assumptions / coding / chart / writing）的通用规范文本。"""
     sections = load_norm_sections()
     return _join_sections(sections, _NODE_SECTIONS.get(node, []))
 
@@ -119,6 +120,7 @@ def build_knowledge_payload(problem_type: str) -> dict[str, str]:
     - assumption_knowledge: 假设与模型建立规范（→ Clarifier / Milestone Reviewer 1）
     - coding_knowledge: 代码实现与编码防错（→ Coder）
     - chart_knowledge: 图表与可视化规范（→ Drawer）
+    - writing_knowledge: 论文写作与验收规范（→ Writer / Final Reviewer）
     """
     sections = load_norm_sections()
     if not sections:
@@ -130,6 +132,7 @@ def build_knowledge_payload(problem_type: str) -> dict[str, str]:
             "assumption_knowledge": "",
             "coding_knowledge": "",
             "chart_knowledge": "",
+            "writing_knowledge": "",
         }
 
     resolved_type = problem_type if problem_type in _TYPE_GUIDE_SECTIONS else "unknown"
@@ -146,4 +149,5 @@ def build_knowledge_payload(problem_type: str) -> dict[str, str]:
         "assumption_knowledge": _join_sections(sections, _NODE_SECTIONS["assumptions"]),
         "coding_knowledge": _join_sections(sections, _NODE_SECTIONS["coding"]),
         "chart_knowledge": _join_sections(sections, _NODE_SECTIONS["chart"]),
+        "writing_knowledge": _join_sections(sections, _NODE_SECTIONS["writing"]),
     }

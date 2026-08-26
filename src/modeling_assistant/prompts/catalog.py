@@ -442,6 +442,7 @@ class PromptContext:
         craft_algorithm_json = "[]"
         craft_interpretation_json = "[]"
         craft_writing_json = "[]"
+        craft_signature_moves_json = "[]"
         craft_figure_placement_json = "[]"
         craft_section_focus_json = "[]"
         craft_argument_flow_json = "{}"
@@ -519,25 +520,26 @@ class PromptContext:
                 exemplar_writing_json = json.dumps(
                     writing_entries, ensure_ascii=False, indent=2
                 )
-            # 亮点与短摘录（始终提供，供 Writer 参考，受防抄袭约束）
-            exemplar_highlights_json = json.dumps(
-                [
-                    {"card": c.id, "highlight": h}
-                    for c in cards
-                    for h in c.highlights
-                ],
-                ensure_ascii=False,
-                indent=2,
-            )
-            exemplar_quotes_json = json.dumps(
-                [
-                    {"card": c.id, "quote": q}
-                    for c in cards
-                    for q in c.quotes
-                ],
-                ensure_ascii=False,
-                indent=2,
-            )
+            # 亮点与短摘录（受 highlight 注入层控制；dropout 可关闭，防同质化）
+            if injection.get("highlight", True):
+                exemplar_highlights_json = json.dumps(
+                    [
+                        {"card": c.id, "highlight": h}
+                        for c in cards
+                        for h in c.highlights
+                    ],
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                exemplar_quotes_json = json.dumps(
+                    [
+                        {"card": c.id, "quote": q}
+                        for c in cards
+                        for q in c.quotes
+                    ],
+                    ensure_ascii=False,
+                    indent=2,
+                )
             if profile is not None:
                 style_profile_json = profile.model_dump_json(indent=2)
             # ── 行文技艺参考（craft 层，与 writing 注入开关同步）──
@@ -564,6 +566,11 @@ class PromptContext:
                     )
                     craft_writing_json = json.dumps(
                         [w.model_dump() for w in craft.writing_common],
+                        ensure_ascii=False,
+                        indent=2,
+                    )
+                    craft_signature_moves_json = json.dumps(
+                        [m.model_dump() for m in craft.signature_moves_common],
                         ensure_ascii=False,
                         indent=2,
                     )
@@ -601,6 +608,7 @@ class PromptContext:
         assumption_knowledge = ""
         coding_knowledge = ""
         chart_knowledge = ""
+        writing_knowledge = ""
         method_knowledge_enabled = str(
             extra.get("method_knowledge_enabled", True)
         ).strip().lower() in {"1", "true", "yes", "y", "on"}
@@ -614,14 +622,23 @@ class PromptContext:
                 )
             try:
                 from modeling_assistant.data.method_knowledge import build_knowledge_payload
-                from modeling_assistant.memory.exemplar_search import judge_problem_type
+                from modeling_assistant.memory.exemplar_search import (
+                    PROBLEM_TYPES,
+                    judge_problem_type,
+                )
 
                 judged_type, _conf = judge_problem_type(
                     raw_problem,
                     problem_understanding=problem_understanding,
                 )
+                # V22：题型已经 HITL 确认时，以确认值为准（覆盖自动判定）
+                control_type = ""
+                if self.control is not None:
+                    control_type = str(getattr(self.control, "problem_type", "") or "")
+                if control_type in PROBLEM_TYPES:
+                    judged_type = control_type
                 # 空题面 + 无破题理解时判定为 unknown，避免误注入某个具体题型知识
-                if not (raw_problem or "").strip() and not (problem_understanding or "").strip():
+                elif not (raw_problem or "").strip() and not (problem_understanding or "").strip():
                     judged_type = "unknown"
                 knowledge = build_knowledge_payload(judged_type)
                 method_knowledge_active = knowledge["method_knowledge_active"]
@@ -631,6 +648,7 @@ class PromptContext:
                 assumption_knowledge = knowledge["assumption_knowledge"]
                 coding_knowledge = knowledge["coding_knowledge"]
                 chart_knowledge = knowledge["chart_knowledge"]
+                writing_knowledge = knowledge["writing_knowledge"]
             except Exception as exc:
                 logger.warning("方法知识库注入失败（降级为空知识）: %s", exc)
         return {
@@ -709,6 +727,7 @@ class PromptContext:
             "craft_algorithm_json": craft_algorithm_json,
             "craft_interpretation_json": craft_interpretation_json,
             "craft_writing_json": craft_writing_json,
+            "craft_signature_moves_json": craft_signature_moves_json,
             "craft_figure_placement_json": craft_figure_placement_json,
             "craft_section_focus_json": craft_section_focus_json,
             "craft_argument_flow_json": craft_argument_flow_json,
@@ -720,6 +739,7 @@ class PromptContext:
             "assumption_knowledge": assumption_knowledge,
             "coding_knowledge": coding_knowledge,
             "chart_knowledge": chart_knowledge,
+            "writing_knowledge": writing_knowledge,
             # V15 终审 LLM 审查：论文全文（final_reviewer_node 注入，缺失时为空）
             "paper_text": str(extra.get("paper_text", "")),
             # V15 论文修订反馈（writer_node 注入，首次撰写时为空）

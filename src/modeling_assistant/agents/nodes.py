@@ -53,6 +53,7 @@ from modeling_assistant.schemas.state import (
     StaticLTM,
     SubQuestionResult,
 )
+from modeling_assistant.validation.assumption_tags import classify_assumptions
 
 logger = logging.getLogger(__name__)
 
@@ -321,6 +322,7 @@ def _advance_sub_question(
     control.modeling_revision_budget = control.sub_question_budget
     control.debate_round = 0
     control.top_k_plans = []
+    control.plan_pool_ids = []
     control.selected_plan_id = None
     control.need_rebrainstorm = False
     control.trigger_clarifier_revision = False
@@ -544,8 +546,11 @@ def searcher_node(state: GraphState, runtime: AgentRuntime | None = None, config
                 "searcher",
                 state,
                 system_prompt=(
-                    "你是一个学术检索专家。根据以下破题思路与原始问题，提取 3-5 个核心检索关键词，"
-                    "用逗号分隔，只输出关键词，不要其他内容。\n\n"
+                    "你是一个学术检索专家。根据以下破题思路与原始问题，提取 3-5 个核心检索关键词。\n"
+                    "V19 要求：ArXiv 只索引英文元数据，必须把中文概念翻译成英文专业术语"
+                    "（如：NIPT→non-invasive prenatal testing；Y 染色体浓度→fetal Y chromosome DNA fraction；"
+                    "孕周→gestational age；染色体非整倍体→chromosome aneuploidy / trisomy）。\n"
+                    "用逗号分隔，只输出英文关键词，不要其他内容。\n\n"
                     f"破题思路：{search_context}\n\n"
                     f"原始问题：{static_ltm.raw_problem}"
                 ),
@@ -660,45 +665,108 @@ def exemplar_loader_node(
 ) -> GraphState:
     """加载优秀论文表达知识（Exemplar Learning System）。
 
-    在 searcher 之后、mathematician 之前运行：检索与当前题型匹配的 L1 卡片、
-    L2 题型指南与 L3 全局偏好，组装 ExemplarContext 供下游 prompt 注入。
+    在 searcher 之后、mathematician 之前运行：判定题型并交 HITL 确认，
+    再用确认后的题型检索 L1 卡片、L2 题型指南与 L3 全局偏好，
+    组装 ExemplarContext 供下游 prompt 注入。
 
     设计原则：
     - 无知识库或相关性低于阈值 → 返回 inactive 的 ExemplarContext，
       现有建模/路由/验证逻辑完全不变。
-    - writing 卡按 style_dropout_rate 概率随机关闭，防止系统过度依赖示例文风。
+    - 题型判定（如 evaluation 这类易误判题型）必须经人类确认，避免误判
+      导致方法知识与示例库注入错误方向。
+    - 图表风格/亮点卡按 style_dropout_rate 概率随机关闭（防同质化）；
+      句子级句法规则（writing 层）稳定注入，不参与 dropout。
     """
     resolved_runtime = _runtime(runtime)
     static_ltm = _static_ltm(state)
-    from modeling_assistant.memory.exemplar_search import load_exemplar_context
+    control = _control(state)
+    from modeling_assistant.memory.exemplar_search import (
+        PROBLEM_TYPES,
+        judge_problem_type,
+        load_exemplar_context,
+    )
 
+    # 1) 题型判定 + HITL 确认（已确认过的复用，不重复打断）
+    if not control.problem_type:
+        ptype, confidence = judge_problem_type(
+            static_ltm.raw_problem,
+            runtime=resolved_runtime,
+            problem_understanding=static_ltm.problem_understanding,
+        )
+        control.problem_type = ptype
+        control.problem_type_confidence = confidence
+        control.hitl_required = True
+        control.hitl_stage = "problem_type"
+        decision = interrupt({
+            "stage": "problem_type",
+            "message": (
+                f"已判定题型为「{ptype}」（置信度 {confidence:.2f}）。"
+                "题型决定方法知识、示例库与后续建模方向，请确认或修正。"
+            ),
+            "hint": (
+                "输入 'approve' 确认题型；"
+                "输入 'set optimization|physics|forecasting|evaluation|data_mining' "
+                "覆盖题型。"
+            ),
+            "problem_type": ptype,
+            "confidence": confidence,
+        })
+        control.hitl_required = False
+        control.hitl_stage = "none"
+        action = _parse_hitl_decision(decision)
+        if action["type"] == "set":
+            override = str(action.get("version") or "").strip()
+            if override in PROBLEM_TYPES:
+                control.problem_type = override
+                control.problem_type_confidence = 1.0
+                logger.info("题型经人类修正为：%s", override)
+            else:
+                logger.warning(
+                    "人类输入的题型无效，保留判定值 %s：%s",
+                    control.problem_type,
+                    override,
+                )
+
+    # 2) 按确认后的题型加载示例知识
     context = load_exemplar_context(
         resolved_runtime.settings,
         static_ltm.raw_problem,
         runtime=resolved_runtime,
         problem_understanding=static_ltm.problem_understanding,
+        problem_type=control.problem_type,
     )
-    # 注入强度分级（数值作为各层注入概率）+ writing 卡额外 dropout：
-    # 防止系统过度依赖示例库，保持输出多样性。
+    # 注入强度分级（数值作为各层注入概率）；额外 dropout 只作用于图表风格与
+    # 亮点/短摘录（易同质化部分），句法规则（writing 层）不参与 dropout。
     if context.active:
         for key, strength in resolved_runtime.settings.style_injection.items():
             if strength <= 0:
                 context.injection[key] = False
             elif strength < 1.0 and random.random() > strength:
                 context.injection[key] = False
-        if context.injection.get("writing", False):
-            if random.random() < resolved_runtime.settings.style_dropout_rate:
-                context.injection["writing"] = False
+        for layer in ("chart", "highlight"):
+            if context.injection.get(layer, False) and random.random() < resolved_runtime.settings.style_dropout_rate:
+                context.injection[layer] = False
                 logger.info(
-                    "Exemplar writing 注入被 Dropout 关闭（rate=%.2f）",
+                    "Exemplar %s 注入被 Dropout 关闭（rate=%.2f）",
+                    layer,
                     resolved_runtime.settings.style_dropout_rate,
                 )
-    return {"exemplars": context}
+    return {"exemplars": context, "control": control}
 
 
 # ═══════════════════════════════════════════════════════════════════
 # 阶段二：建模核心 —— "先发散，后剪枝"
 # ═══════════════════════════════════════════════════════════════════
+
+def _update_plan_pool(control: ControlState, w_inn: float, w_fea: float) -> None:
+    """V23：保留综合评分最高的前 N 个 keep 方案作为「方案池」。
+
+    供架构 HITL 呈现各方案实现路径，由人类测试后定夺采用哪一个。
+    """
+    kept = [p for p in control.top_k_plans if p.verdict == "keep"]
+    ranked = sorted(kept, key=lambda p: p.total_score(w_inn, w_fea), reverse=True)
+    control.plan_pool_ids = [p.id for p in ranked[: control.plan_pool_size]]
+
 
 def mathematician_node(state: GraphState, runtime: AgentRuntime | None = None, config: dict | None = None) -> GraphState:
     """发散与创新：头脑风暴 Top-K 候选方案。
@@ -930,6 +998,7 @@ def realist_node(state: GraphState, runtime: AgentRuntime | None = None, config:
             control.feasibility_score = selected.feasibility_score
             control.need_rebrainstorm = not viable
 
+    _update_plan_pool(control, w_inn, w_fea)
     control.phase = "plan_scored"
     # V17 运行过程记录：剪枝评分留痕（verdict/选中方案/阈值）
     entry = _emit_process(
@@ -1331,22 +1400,59 @@ def hitl_architecture_node(state: GraphState, runtime: AgentRuntime | None = Non
     """Milestone Reviewer 1：架构确认前的人类审核。
 
     首次进入时 interrupt() 暂停图执行，等待用户输入。
+    V23：展示方案池（Realist 保留的前 N 个 keep 方案）各自的实现路径，
+    人类测试后可用 choose <plan_id> 定夺采用哪个方案。
     重点审核对象是 Clarifier 提出的模型假设（可能影响全局走向的关键假设已在
-    assumptions 中以【关键假设】标注）。用户输入：
-    - 'approve' 放行进入架构设计
+    assumptions 中以【关键】标注；每条假设带【全文】/【问题N】放置标签）。用户输入：
+    - 'approve' 采用评分最高方案并放行进入架构设计
+    - 'choose <plan_id>' 改选方案池中的其他方案（回 Clarifier 按新方案重新提炼）
     - 'rollback <version>' 回滚到指定 LTM 版本
-    - 'revise <假设反馈>' 打回 Clarifier 按反馈修改假设后重新评审
+    - 'revise <假设反馈>' 打回 Clarifier 按反馈修改假设与分类后重新评审
     """
+    control = _control(state)
     dynamic_ltm = _dynamic_ltm(state)
+    plan_by_id = {p.id: p for p in control.top_k_plans}
+    pool_ids = control.plan_pool_ids or [
+        p.id
+        for p in sorted(
+            (p for p in control.top_k_plans if p.verdict == "keep"),
+            key=lambda p: p.total_score(
+                control.innovation_weight, control.feasibility_weight
+            ),
+            reverse=True,
+        )[: control.plan_pool_size]
+    ]
+    plan_pool = [
+        {
+            "id": p.id,
+            "title": p.title,
+            "description": p.description,
+            "innovation_score": p.innovation_score,
+            "feasibility_score": p.feasibility_score,
+            "verdict": p.verdict,
+        }
+        for pid in pool_ids
+        for p in [plan_by_id.get(pid)]
+        if p is not None
+    ]
     decision = interrupt({
         "stage": "architecture",
-        "message": "请审核当前建模方案，重点逐条审核模型假设（假设必须审慎、有依据）。",
-        "hint": (
-            "输入 'approve' 放行进入架构设计；"
-            "'rollback v1.0' 回滚到指定版本；"
-            "'revise <反馈>' 打回 Clarifier 按反馈修改假设。"
+        "message": (
+            f"请审核当前建模方案：前 {len(plan_pool)} 个候选方案及其实现路径如下"
+            "（方案池），可在测试后定夺采用哪一个；同时逐条审核模型假设及其分类："
+            "【全文】假设进入全文假设章（3_assumptions.tex，≤6 条）；"
+            "【问题N】假设只进入对应小题章节；【关键】假设必须配验证实验。"
         ),
+        "hint": (
+            f"输入 'approve' 采用评分最高方案（{control.selected_plan_id or '无'}）"
+            "进入架构设计；"
+            f"'choose <plan_id>' 改选方案池中的其他方案（可选 {[p['id'] for p in plan_pool]}）；"
+            "'rollback v1.0' 回滚到指定版本；"
+            "'revise <反馈>' 打回 Clarifier 修改假设与分类。"
+        ),
+        "plan_pool": plan_pool,
         "assumptions": list(dynamic_ltm.assumptions or []),
+        "assumption_review": classify_assumptions(dynamic_ltm.assumptions or []),
         "dynamic_ltm": dynamic_ltm.model_dump(),
         "load_bearing_summary": _load_bearing_summary(state),
         "control_summary": {
@@ -1357,7 +1463,6 @@ def hitl_architecture_node(state: GraphState, runtime: AgentRuntime | None = Non
         },
     })
 
-    control = _control(state)
     action = _parse_hitl_decision(decision)
 
     if action["type"] == "rollback":
@@ -1377,6 +1482,29 @@ def hitl_architecture_node(state: GraphState, runtime: AgentRuntime | None = Non
             "架构 HITL：人类打回假设并要求修改（反馈=%s），回 Clarifier 重新提炼",
             feedback[:120],
         )
+    elif action["type"] == "choose":
+        chosen = str(action.get("version") or "").strip()
+        valid_ids = {p["id"] for p in plan_pool}
+        if chosen in valid_ids:
+            if chosen != control.selected_plan_id:
+                control.selected_plan_id = chosen
+                control.phase = "architecture_plan_switched"
+                logger.info(
+                    "架构 HITL：人类改选方案 %s，回 Clarifier 按新方案重新提炼 LTM",
+                    chosen,
+                )
+            else:
+                control.phase = "architecture_approved"
+        else:
+            logger.warning(
+                "架构 HITL：人类选择的方案无效：%s（可选 %s），保留当前方案",
+                chosen,
+                sorted(valid_ids),
+            )
+            control.phase = "architecture_approved"
+        control.hitl_required = False
+        control.hitl_stage = "none"
+        control.rollback_source = "none"
     else:
         control.phase = "architecture_approved"
         control.hitl_required = False
@@ -1385,12 +1513,17 @@ def hitl_architecture_node(state: GraphState, runtime: AgentRuntime | None = Non
     entry = _emit_process(
         runtime, control, state, "hitl_architecture", "architecture_hitl",
         (
-            f"人类回滚到 {control.rollback_to_version}"
-            if action["type"] == "rollback"
-            else (
-                "人类打回假设并要求修改，回 Clarifier 重新提炼"
-                if action["type"] == "revise"
-                else "人类批准建模方案（含假设），进入架构设计"
+            {
+                "rollback": f"人类回滚到 {control.rollback_to_version}",
+                "revise": "人类打回假设并要求修改，回 Clarifier 重新提炼",
+                "choose": (
+                    f"人类改选方案 {control.selected_plan_id}，回 Clarifier 重新提炼"
+                    if control.phase == "architecture_plan_switched"
+                    else "人类确认当前方案，进入架构设计"
+                ),
+            }.get(
+                action["type"],
+                "人类批准建模方案（含假设），进入架构设计",
             )
         ),
         {
@@ -1461,6 +1594,8 @@ def hitl_modeling_node(state: GraphState, runtime: AgentRuntime | None = None, c
 
     当 modeling_revision_count >= modeling_revision_budget 时触发，
     让人类决断下一步，而非直接产出"待验证"论文。
+    V21：主方案结果为退化解（所有样本/分组结果相同、答案列常量、最优值全部
+    落在边界值）时必须判 fail，不得以「结果诚实/待验证」为由接受。
 
     三个选项：
     - accept：接受失败，前进到 collect_artifacts（现行"待验证"降级行为）
@@ -1481,9 +1616,12 @@ def hitl_modeling_node(state: GraphState, runtime: AgentRuntime | None = None, c
         "message": (
             f"建模预算已耗尽（{control.modeling_revision_count}/{control.modeling_revision_budget}）。"
             "系统多次尝试未能产出通过验证的结果，请人类决断下一步。"
+            "若主方案结果是退化解（所有样本/分组结果相同、答案列常量、"
+            "最优值全部落在边界值），必须判 fail，不得以「结果诚实/待验证」为由接受。"
         ),
         "hint": (
-            "输入 'accept' 接受失败并产出'待验证'论文；"
+            "输入 'accept' 接受失败并产出'待验证'论文（仅限非退化解："
+            "结果有区分度但数值待验证）；"
             "输入 'retry' 重置预算并回到 Architect 重试当前方案；"
             "输入 'redirect <方向提示>' 重置预算并回到 Mathematician 重新发散。"
         ),
@@ -1586,21 +1724,30 @@ def hitl_final_node(state: GraphState, runtime: AgentRuntime | None = None, conf
     """Milestone Reviewer 2：终稿审查。
 
     首次进入时 interrupt() 暂停图执行，等待用户输入。
+    重点展示 3_assumptions.tex，供人工检查假设章的放置与闭环。
     用户输入：
     - 'approve' 完成（可附带 'score <0-100>' 把本次评价回写示例库）
     - 'retry' 回到建模阶段重新打磨
     - 'rewrite <反馈>' 回到 Writer 按反馈重写论文（有预算上限，防死循环）
     """
     control = _control(state)
+    resolved_runtime = _runtime(runtime)
+    paper_dir = Path(resolved_runtime.output_path("paper"))
     decision = interrupt({
         "stage": "final",
-        "message": "请审核最终论文。",
+        "message": (
+            "请审核最终论文，重点检查模型假设章（3_assumptions.tex）："
+            "1) 是否只有通俗的全文建模前提；"
+            "2) 是否混入参数、模型分布、数据规则等实现细节；"
+            "3) 关键假设是否都有敏感性/对照验证。"
+        ),
         "hint": (
             "输入 'approve' 完成流程；'retry' 回到建模阶段重新打磨；"
             f"'rewrite <反馈>' 回到 Writer 重写论文（剩余 {max(0, control.paper_revision_budget - control.paper_revision_count)} 次）。"
         ),
         "artifacts_summary": state.get("artifacts", ArtifactBundle()).model_dump(),
         "paper_review_report": control.paper_review_report,
+        "assumptions_section": _read_assumptions_section(paper_dir),
     })
 
     action = _parse_hitl_decision(decision)
@@ -1755,6 +1902,12 @@ def _parse_hitl_decision(decision) -> dict:
     if text.startswith("edit"):
         parts = text.split(maxsplit=1)
         return {"type": "edit", "version": parts[1] if len(parts) > 1 else "", "score": score}
+    if text.startswith("choose"):
+        parts = text.split(maxsplit=1)
+        return {"type": "choose", "version": parts[1] if len(parts) > 1 else "", "score": score}
+    if text.startswith("set"):
+        parts = text.split(maxsplit=1)
+        return {"type": "set", "version": parts[1] if len(parts) > 1 else "", "score": score}
     return {"type": "approve", "version": None, "score": score}
 
 
@@ -2024,7 +2177,11 @@ def _result_preview_for_acceptance(artifacts: ArtifactBundle, limit: int = 4000)
 
 
 def _combined_sub_ltms(control: ControlState) -> DynamicLTM:
-    """把全部已完成小题的 LTM 合并成 Writer 可用的聚合 LTM。"""
+    """把全部已完成小题的 LTM 合并成 Writer 可用的聚合 LTM。
+
+    V20：假设按原文去重（保序），避免多小题各自写入相同的【全文】假设后
+    在 3_assumptions.tex 重复出现。
+    """
     ltms = control.sub_ltms or []
     if not ltms:
         return DynamicLTM()
@@ -2033,8 +2190,12 @@ def _combined_sub_ltms(control: ControlState) -> DynamicLTM:
     equations: list[str] = []
     outlines: list[str] = []
     objectives: list[str] = []
+    seen_assumptions: set[str] = set()
     for ltm in ltms:
-        assumptions.extend(ltm.assumptions or [])
+        for assumption in ltm.assumptions or []:
+            if assumption not in seen_assumptions:
+                seen_assumptions.add(assumption)
+                assumptions.append(assumption)
         nomenclature.update(ltm.nomenclature or {})
         equations.extend(ltm.equations or [])
         if ltm.solution_outline:
@@ -2048,6 +2209,19 @@ def _combined_sub_ltms(control: ControlState) -> DynamicLTM:
         objective="；".join(objectives),
         solution_outline="\n".join(outlines),
     )
+
+
+def _read_assumptions_section(paper_dir: Path) -> str:
+    """读取论文 3_assumptions.tex 内容供终审 HITL 展示；缺失时安全降级。"""
+    candidates = [
+        paper_dir / "sections" / "3_assumptions.tex",
+        paper_dir / "3_assumptions.tex",
+    ]
+    for path in candidates:
+        if path.exists():
+            text = path.read_text(encoding="utf-8", errors="replace").strip()
+            return text or "（3_assumptions.tex 为空）"
+    return "（未找到 3_assumptions.tex：假设章缺失或尚未生成）"
 
 
 def sub_question_acceptance_node(

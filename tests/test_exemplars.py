@@ -45,7 +45,12 @@ def test_exemplar_context_defaults_inactive():
     assert ctx.active is False
     assert ctx.cards == []
     assert ctx.guide is None
-    assert ctx.injection == {"structure": True, "chart": True, "writing": True}
+    assert ctx.injection == {
+        "structure": True,
+        "chart": True,
+        "writing": True,
+        "highlight": True,
+    }
     # JSON round-trip
     restored = ExemplarContext.model_validate_json(ctx.model_dump_json())
     assert restored.active is False
@@ -85,6 +90,29 @@ def test_judge_problem_type_keywords():
     ptype, conf = judge_problem_type("完全没有赛题关键词 abcdefg")
     assert ptype == "data_mining"
     assert conf < 0.5
+
+
+def test_search_exemplars_uses_provided_problem_type(tmp_path, monkeypatch):
+    """V22：HITL 确认后的题型应直接用于检索，不再自动判定。"""
+    from modeling_assistant.config.settings import AppSettings
+    from modeling_assistant.memory.exemplar_search import search_exemplars
+
+    kb = _make_kb(tmp_path)
+    settings = AppSettings(exemplars_dir=kb)
+
+    def fake_judge(*args, **kwargs):
+        raise AssertionError("提供 problem_type 时不应调用自动判定")
+
+    monkeypatch.setattr(
+        "modeling_assistant.memory.exemplar_search.judge_problem_type", fake_judge
+    )
+    ctx = search_exemplars(
+        "城市物流配送调度优化问题",
+        settings=settings,
+        problem_type="physics",
+    )
+    assert ctx.active
+    assert [c.id for c in ctx.cards] == ["phy1"]
 
 
 # ── 4. 检索：命中 / 未命中 / 低于阈值 ────────────────────────────────────────
@@ -309,14 +337,16 @@ def test_apply_feedback_to_context_updates_cards_and_guide():
 
 
 def test_exemplar_loader_node_inactive_with_empty_library(tmp_path):
+    """V22：题型已确认（control.problem_type 非空）时跳过 HITL，无库降级不崩溃。"""
     runtime = AgentRuntime.from_settings(
         load_settings(output_dir=tmp_path / "out", exemplars_dir=tmp_path / "kb")
     )
     result = exemplar_loader_node(
         {
             "static_ltm": StaticLTM(raw_problem="城市绿色物流配送调度优化"),
-            "control": ControlState(),
+            "control": ControlState(problem_type="optimization"),
         },
         runtime=runtime,
     )
     assert result["exemplars"].active is False
+    assert result["control"].problem_type == "optimization"

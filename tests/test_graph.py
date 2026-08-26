@@ -240,6 +240,37 @@ def test_realist_pruning_filters_low_feasibility():
     assert result["control"].selected_plan_id == "p1"
 
 
+def test_realist_plan_pool_keeps_top_three():
+    """V23：Realist 剪枝后保留评分最高的前 3 个 keep 方案进方案池。"""
+    from modeling_assistant.agents.nodes import realist_node
+    from modeling_assistant.schemas.state import GraphState
+
+    state: GraphState = {
+        "static_ltm": StaticLTM(raw_problem="测试"),
+        "dynamic_ltm": DynamicLTM(),
+        "ltm_archive": [],
+        "control": ControlState(
+            innovation_threshold=60,
+            feasibility_threshold=60,
+            top_k_plans=[
+                PlanCandidate(id="p1", title="方案1", description="", innovation_score=90, feasibility_score=90),
+                PlanCandidate(id="p2", title="方案2", description="", innovation_score=85, feasibility_score=85),
+                PlanCandidate(id="p3", title="方案3", description="", innovation_score=80, feasibility_score=80),
+                PlanCandidate(id="p4", title="方案4", description="", innovation_score=70, feasibility_score=70),
+                PlanCandidate(id="p5", title="方案5", description="", innovation_score=60, feasibility_score=60),
+            ],
+        ),
+        "artifacts": ArtifactBundle(),
+        "prompt_audit": {},
+    }
+    runtime = AgentRuntime.from_settings(
+        AppSettings(output_dir=Path("outputs"), api_key_env="MISSING_KEY_FOR_TEST")
+    )
+    result = realist_node(state, runtime=runtime)
+    assert result["control"].selected_plan_id == "p1"
+    assert result["control"].plan_pool_ids == ["p1", "p2", "p3"]
+
+
 def test_arbiter_routing_triggers_only_after_max_rounds():
     """route_after_realist 仅在 debate_round > max_debate_rounds 时进入 arbiter。"""
     from modeling_assistant.graph.routing import route_after_realist
@@ -503,6 +534,18 @@ def test_route_after_architecture_hitl_revise_goes_to_clarifier():
     )
 
 
+def test_route_after_architecture_hitl_plan_switch_goes_to_clarifier():
+    """V23：方案池中改选其他方案 → 回 Clarifier 按新方案重新提炼 LTM。"""
+    from modeling_assistant.graph.routing import route_after_architecture_hitl
+
+    assert (
+        route_after_architecture_hitl(
+            {"control": ControlState(phase="architecture_plan_switched")}
+        )
+        == "clarifier"
+    )
+
+
 def test_route_after_hitl_modeling_routes_by_decision():
     """HITL modeling 后根据人类决策路由：accept→collect_artifacts, retry→architect, redirect→mathematician。"""
     from modeling_assistant.graph.routing import route_after_hitl_modeling
@@ -539,3 +582,21 @@ def test_milestone_reviewer_1_hard_rejection():
     result = milestone_reviewer_1_node(state)
     assert result["control"].need_rebrainstorm is True
     assert result["control"].phase == "milestone_review_1_rejected"
+
+
+def test_combined_sub_ltms_dedupes_assumptions():
+    """V20：合并多小题 LTM 时假设按原文去重（保序），避免全文假设重复。"""
+    from modeling_assistant.agents.nodes import _combined_sub_ltms
+
+    control = ControlState(
+        sub_ltms=[
+            DynamicLTM(assumptions=["【全文】数据真实可靠", "【问题1】浓度建模"]),
+            DynamicLTM(assumptions=["【全文】数据真实可靠", "【问题2】时序建模"]),
+        ]
+    )
+    combined = _combined_sub_ltms(control)
+    assert combined.assumptions == [
+        "【全文】数据真实可靠",
+        "【问题1】浓度建模",
+        "【问题2】时序建模",
+    ]

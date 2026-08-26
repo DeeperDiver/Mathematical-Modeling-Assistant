@@ -150,11 +150,12 @@ def main() -> None:
         n_alg = len(craft.algorithm)
         n_int = len(craft.interpretation)
         n_wri = len(craft.writing)
+        n_sig = len(craft.signature_moves)
         n_fig = len(craft.figure_placements)
         n_sec = len(craft.section_focuses)
         print(
             f"[ok] {card_id} deriv={n_der} alg={n_alg} interp={n_int} "
-            f"writing={n_wri} figpos={n_fig} section={n_sec} ({time.time()-t0:.0f}s)"
+            f"writing={n_wri} sig={n_sig} figpos={n_fig} section={n_sec} ({time.time()-t0:.0f}s)"
         )
 
     print(f"\n完成：深加工 {done} 篇，跳过 {skipped} 篇，失败 {failed} 篇。")
@@ -180,7 +181,7 @@ def main() -> None:
                 f"[guide] {guide.problem_type}: deriv={len(guide.derivation_common)} "
                 f"alg={len(guide.algorithm_common)} interp={len(guide.interpretation_common)} "
                 f"writing={len(guide.writing_common)} figpos={len(guide.figure_placement_common)} "
-                f"section={len(guide.section_focus_common)}"
+                f"section={len(guide.section_focus_common)} sig={len(guide.signature_moves_common)}"
             )
         print(f"题型指南目录：{guides_dir}")
 
