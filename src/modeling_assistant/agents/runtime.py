@@ -182,6 +182,7 @@ class AgentRuntime:
         if system_prompt is None:
             system_prompt = self.render_prompt(prompt_name, state)
         max_tokens = self.settings.max_tokens_for(prompt_name)
+        temperature = self.settings.temperature_for(prompt_name)
         logger.info(
             "Invoking LLM [%s] model=%s max_tokens=%d",
             prompt_name,
@@ -202,7 +203,7 @@ class AgentRuntime:
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": "请执行你的任务，严格按要求的格式输出。"},
                 ],
-                temperature=0.3,
+                temperature=temperature,
                 max_tokens=max_tokens,
                 stream=True,
                 stream_options={"include_usage": True},

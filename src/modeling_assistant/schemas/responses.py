@@ -16,14 +16,20 @@ class PlanEvaluation(BaseModel):
     """Realist 对单个候选方案的评估。"""
 
     plan_id: str
+    problem_fit_score: int = Field(default=0, ge=0, le=100)
+    data_assumption_score: int = Field(default=0, ge=0, le=100)
+    mathematical_correctness_score: int = Field(default=0, ge=0, le=100)
+    verifiability_score: int = Field(default=0, ge=0, le=100)
+    computability_score: int = Field(default=0, ge=0, le=100)
     innovation_score: int = Field(default=0, ge=0, le=100)
     feasibility_score: int = Field(default=0, ge=0, le=100)
     verdict: Literal["keep", "kill", "reject"] = "keep"
+    fatal_risks: list[str] = Field(default_factory=list)
     feedback: str = ""
 
 
 class MathematicianResponse(BaseModel):
-    plans: list[dict] = Field(default_factory=list)
+    plans: list[dict] = Field(default_factory=list, min_length=4, max_length=4)
     branch_requested: bool = False
     branch_from_version: str | None = None
     branch_reason: str = ""
@@ -46,6 +52,8 @@ class ClarifierResponse(BaseModel):
     equations: list[str] = Field(default_factory=list)
     objective: str = ""
     solution_outline: str = ""
+    identifiability_checks: list[str] = Field(default_factory=list)
+    constant_relevance: dict[str, str] = Field(default_factory=dict)
     commit_summary: str = ""
 
 

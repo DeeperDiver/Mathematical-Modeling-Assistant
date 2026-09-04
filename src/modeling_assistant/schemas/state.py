@@ -144,6 +144,8 @@ class DynamicLTM(BaseModel):
     equations: list[str] = Field(default_factory=list)
     objective: str = ""
     solution_outline: str = ""
+    identifiability_checks: list[str] = Field(default_factory=list)
+    constant_relevance: dict[str, str] = Field(default_factory=dict)
 
 
 class LtmSnapshot(BaseModel):
@@ -159,13 +161,45 @@ class PlanCandidate(BaseModel):
     id: str
     title: str
     description: str
+    strategy_type: Literal["baseline", "primary", "challenge", "alternative"] = "alternative"
+    input_data: list[str] = Field(default_factory=list)
+    assumptions: list[str] = Field(default_factory=list)
+    mathematical_object: str = ""
+    parameter_estimation: str = ""
+    solution_method: str = ""
+    expected_outputs: list[str] = Field(default_factory=list)
+    validation_method: str = ""
+    failure_conditions: list[str] = Field(default_factory=list)
+    fatal_risks: list[str] = Field(default_factory=list)
+    review_feedback: str = ""
+    problem_fit_score: int = Field(default=0, ge=0, le=100)
+    data_assumption_score: int = Field(default=0, ge=0, le=100)
+    mathematical_correctness_score: int = Field(default=0, ge=0, le=100)
+    verifiability_score: int = Field(default=0, ge=0, le=100)
+    computability_score: int = Field(default=0, ge=0, le=100)
     innovation_score: int = Field(default=0, ge=0, le=100)
     feasibility_score: int = Field(default=0, ge=0, le=100)
     source_snapshot_version: str | None = None
     verdict: Literal["keep", "kill", "reject"] = "keep"
 
     def total_score(self, w_inn: float = 0.5, w_fea: float = 0.5) -> float:
-        """综合评分：Score_total = w1 * S_inn + w2 * S_fea。"""
+        """守住硬门槛后以创新拉开差距；旧记录兼容原二项评分。"""
+        detailed = (
+            self.problem_fit_score,
+            self.data_assumption_score,
+            self.mathematical_correctness_score,
+            self.verifiability_score,
+            self.computability_score,
+        )
+        if any(detailed):
+            return (
+                0.20 * self.problem_fit_score
+                + 0.15 * self.data_assumption_score
+                + 0.20 * self.mathematical_correctness_score
+                + 0.10 * self.verifiability_score
+                + 0.10 * self.computability_score
+                + 0.25 * self.innovation_score
+            )
         return w_inn * self.innovation_score + w_fea * self.feasibility_score
 
 
@@ -475,14 +509,14 @@ class ControlState(BaseModel):
     max_debate_rounds: int = 3
     innovation_threshold: int = 60
     feasibility_threshold: int = 60
-    innovation_weight: float = 0.5
-    feasibility_weight: float = 0.5
+    innovation_weight: float = 0.3
+    feasibility_weight: float = 0.7
     top_k_plans: list[PlanCandidate] = Field(default_factory=list)
     selected_plan_id: str | None = None
     # V23 方案池：Realist 剪枝后保留评分最高的前 N 个 keep 方案 id，
     # 供架构 HITL 呈现各自实现路径，由人类测试后定夺
     plan_pool_ids: list[str] = Field(default_factory=list)
-    plan_pool_size: int = 3
+    plan_pool_size: int = 4
     innovation_score: int = Field(default=0, ge=0, le=100)
     feasibility_score: int = Field(default=0, ge=0, le=100)
     need_rebrainstorm: bool = False
@@ -494,6 +528,7 @@ class ControlState(BaseModel):
     hitl_required: bool = False
     hitl_stage: Literal[
         "architecture",
+        "plan_selection",
         "implementation_architecture",
         "implementation_human",
         "sub_question_split",

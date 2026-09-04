@@ -86,6 +86,29 @@ def test_llm_max_tokens_overrides_defaults():
     assert settings.max_tokens_for("searcher") == 2048
 
 
+def test_llm_temperature_overrides_from_env(monkeypatch):
+    monkeypatch.setenv(
+        "MODELING_ASSISTANT_LLM_TEMPERATURE_OVERRIDES",
+        '{"mathematician": 0.8, "clarifier": 0.05}',
+    )
+    settings = load_settings()
+    assert settings.temperature_for("mathematician") == 0.8
+    assert settings.temperature_for("clarifier") == 0.05
+    assert settings.temperature_for("unconfigured") == 0.3
+
+
+def test_default_mathematician_temperature_supports_divergence(monkeypatch):
+    monkeypatch.delenv("MODELING_ASSISTANT_LLM_TEMPERATURE_OVERRIDES", raising=False)
+    settings = load_settings()
+    assert settings.temperature_for("mathematician") == 1.0
+    assert settings.temperature_for("analyst") == 0.6
+    assert settings.temperature_for("realist") == 0.5
+    assert settings.temperature_for("arbiter") == 0.2
+    assert settings.temperature_for("clarifier") == 0.2
+    assert settings.temperature_for("milestone_reviewer_1") == 0.3
+    assert settings.temperature_for("final_reviewer") == 0.2
+
+
 def test_prompt_catalog_renders_ltm_without_history():
     prompt = PromptCatalog().render(
         "coder",
@@ -818,6 +841,21 @@ def test_check_ltm_against_facts_detects_missing_constant():
     assert any("3.0" in i and "未在 LTM 中引用" in i for i in issues)
 
 
+def test_check_ltm_against_facts_skips_explicitly_irrelevant_constant():
+    from modeling_assistant.validation.constants import check_ltm_against_facts
+
+    static_ltm = StaticLTM(
+        problem_facts=[
+            ProblemFact(value=3.0, unit="m/s", context="云团以3 m/s的速度下沉"),
+        ],
+    )
+    dynamic_ltm = DynamicLTM(
+        objective="当前小题不涉及云团运动",
+        constant_relevance={"云团以3 m/s的速度下沉": "无关：属于后续小题"},
+    )
+    assert check_ltm_against_facts(dynamic_ltm, static_ltm) == []
+
+
 def test_check_ltm_against_facts_detects_wrong_value_with_unit():
     """V11.1 第二层主防线：LTM 里出现 '1.0 m/s' 但题目是 3.0 m/s 时应告警。"""
     from modeling_assistant.validation.constants import check_ltm_against_facts
@@ -1485,8 +1523,8 @@ def test_mathematician_prompt_has_occam_rule():
     assert "不在发散阶段自我审查" in prompt
 
 
-def test_mathematician_prompt_requires_more_plans():
-    """V23：Mathematician 每轮至少产出 5 个候选方案，支撑方案池。"""
+def test_mathematician_prompt_requires_four_independent_plans():
+    """Mathematician 每轮固定产出四类独立候选，且不做自评分。"""
     prompt = PromptCatalog().render(
         "mathematician",
         PromptContext(
@@ -1495,8 +1533,9 @@ def test_mathematician_prompt_requires_more_plans():
             control=ControlState(),
         ),
     )
-    assert "至少 5 个" in prompt
-    assert "方案池" in prompt
+    assert "恰好 4 个" in prompt
+    assert "baseline" in prompt
+    assert "不得给自己的方案打分" in prompt
 
 
 def test_clarifier_prompt_has_selected_plan():
@@ -2044,9 +2083,13 @@ def test_human_mode_graph_end_to_end(tmp_path, monkeypatch):
         if name == "analyst":
             return AnalystResponse(problem_understanding="x", data_schema={})
         if name == "mathematician":
-            return MathematicianResponse(plans=[{"id": "p1", "title": "t", "description": "d", "innovation_score": 80, "feasibility_score": 80}])
+            return MathematicianResponse(plans=[
+                {"id": f"p{i}", "title": f"t{i}", "description": "d"}
+                for i in range(1, 5)
+            ])
         if name == "realist":
-            return RealistResponse(plan_evaluations=[PlanEvaluation(plan_id="p1", innovation_score=80, feasibility_score=80, verdict="keep")])
+            plan_id = state["control"].top_k_plans[0].id
+            return RealistResponse(plan_evaluations=[PlanEvaluation(plan_id=plan_id, innovation_score=80, feasibility_score=80, verdict="keep")])
         if name == "clarifier":
             return ClarifierResponse(assumptions=["a"], nomenclature={"x": "x"}, equations=["y=x"], objective="o", solution_outline="s", commit_summary="v")
         if name == "milestone_reviewer_1":
@@ -2093,6 +2136,7 @@ def test_human_mode_graph_end_to_end(tmp_path, monkeypatch):
     }
     cur = state
     seen_human = False
+    seen_plan_selection = False
     final = None
     for _ in range(30):
         result = app.invoke(cur, config)
@@ -2107,8 +2151,11 @@ def test_human_mode_graph_end_to_end(tmp_path, monkeypatch):
             task_dir.mkdir(parents=True, exist_ok=True)
             (task_dir / "solution.py").write_text(solution, encoding="utf-8")
             seen_human = True
+        elif stage == "plan_selection":
+            seen_plan_selection = True
         cur = Command(resume="approve")
     assert seen_human, "应经过人工编程手交付暂停点"
+    assert seen_plan_selection, "Human 模式应在 Clarifier 前经过人工方案选择"
     assert final is not None and final["control"].phase == "completed"
     assert final["artifacts"].result_paths
 
@@ -2260,9 +2307,13 @@ def test_two_sub_questions_human_mode_end_to_end(tmp_path, monkeypatch):
         if name == "analyst":
             return AnalystResponse(problem_understanding="x", data_schema={})
         if name == "mathematician":
-            return MathematicianResponse(plans=[{"id": "p1", "title": "t", "description": "d", "innovation_score": 80, "feasibility_score": 80}])
+            return MathematicianResponse(plans=[
+                {"id": f"p{i}", "title": f"t{i}", "description": "d"}
+                for i in range(1, 5)
+            ])
         if name == "realist":
-            return RealistResponse(plan_evaluations=[PlanEvaluation(plan_id="p1", innovation_score=80, feasibility_score=80, verdict="keep")])
+            plan_id = state["control"].top_k_plans[0].id
+            return RealistResponse(plan_evaluations=[PlanEvaluation(plan_id=plan_id, innovation_score=80, feasibility_score=80, verdict="keep")])
         if name == "clarifier":
             return ClarifierResponse(assumptions=["a"], nomenclature={"x": "x"}, equations=["y=x"], objective="o", solution_outline="s", commit_summary="v")
         if name == "milestone_reviewer_1":

@@ -142,7 +142,9 @@ MODELING_ASSISTANT_API_KEY_ENV=DEEPSEEK_API_KEY
 MODELING_ASSISTANT_SEARCH_ENABLED=false
 MODELING_ASSISTANT_OUTPUT_DIR=outputs
 MODELING_ASSISTANT_MAX_DEBATE_ROUNDS=3
-MODELING_ASSISTANT_INNOVATION_THRESHOLD=60
+# 正确性等作为硬门槛；通过后创新性用于拉开竞赛竞争力
+MODELING_ASSISTANT_INNOVATION_WEIGHT=0.3
+MODELING_ASSISTANT_FEASIBILITY_WEIGHT=0.7
 MODELING_ASSISTANT_FEASIBILITY_THRESHOLD=60
 
 # Exemplar Learning System
@@ -164,6 +166,9 @@ MODELING_ASSISTANT_PAPER_TEMPLATE_DIR=templates/cumcm-latex
 # LLM 输出预算（全局默认 + 分节点覆盖，JSON）
 MODELING_ASSISTANT_LLM_MAX_TOKENS=32768
 MODELING_ASSISTANT_LLM_MAX_TOKENS_OVERRIDES={"writer":32768,"coder":32768,"clarifier":24576,"architect":12288,"drawer":12288,"mathematician":8192,"realist":8192,"reflection":8192,"final_reviewer":8192,"arbiter":4096,"milestone_reviewer_1":4096,"meta_router":4096,"searcher":2048}
+
+# 分节点采样温度：发散节点更高，评审/固化节点更低
+MODELING_ASSISTANT_LLM_TEMPERATURE_OVERRIDES={"mathematician":1.0,"analyst":0.6,"data_analyst":0.3,"realist":0.5,"arbiter":0.2,"clarifier":0.2,"milestone_reviewer_1":0.3,"final_reviewer":0.2}
 ```
 
 ## 目录

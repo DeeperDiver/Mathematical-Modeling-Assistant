@@ -86,9 +86,13 @@ def _mock_sub_question_runtime(monkeypatch, output_dir: Path, mode: str):
         if name == "analyst":
             return AnalystResponse(problem_understanding="x", data_schema={})
         if name == "mathematician":
-            return MathematicianResponse(plans=[{"id": "p1", "title": "t", "description": "d", "innovation_score": 80, "feasibility_score": 80}])
+            return MathematicianResponse(plans=[
+                {"id": f"p{i}", "title": f"t{i}", "description": "d"}
+                for i in range(1, 5)
+            ])
         if name == "realist":
-            return RealistResponse(plan_evaluations=[PlanEvaluation(plan_id="p1", innovation_score=80, feasibility_score=80, verdict="keep")])
+            plan_id = state["control"].top_k_plans[0].id
+            return RealistResponse(plan_evaluations=[PlanEvaluation(plan_id=plan_id, innovation_score=80, feasibility_score=80, verdict="keep")])
         if name == "clarifier":
             return ClarifierResponse(assumptions=["a"], nomenclature={"x": "x"}, equations=["y=x"], objective="o", solution_outline="s", commit_summary="v")
         if name == "milestone_reviewer_1":
@@ -240,8 +244,8 @@ def test_realist_pruning_filters_low_feasibility():
     assert result["control"].selected_plan_id == "p1"
 
 
-def test_realist_plan_pool_keeps_top_three():
-    """V23：Realist 剪枝后保留评分最高的前 3 个 keep 方案进方案池。"""
+def test_realist_plan_pool_keeps_top_four():
+    """Realist 剪枝后保留评分最高的前 4 个 keep 方案进方案池。"""
     from modeling_assistant.agents.nodes import realist_node
     from modeling_assistant.schemas.state import GraphState
 
@@ -268,7 +272,69 @@ def test_realist_plan_pool_keeps_top_three():
     )
     result = realist_node(state, runtime=runtime)
     assert result["control"].selected_plan_id == "p1"
-    assert result["control"].plan_pool_ids == ["p1", "p2", "p3"]
+    assert result["control"].plan_pool_ids == ["p1", "p2", "p3", "p4"]
+
+
+def test_realist_does_not_reject_sound_baseline_for_low_innovation():
+    """创新性是加分项：低创新但可行的经典基线必须保留。"""
+    from modeling_assistant.agents.nodes import realist_node
+    from modeling_assistant.schemas.state import GraphState
+
+    state: GraphState = {
+        "static_ltm": StaticLTM(raw_problem="测试"),
+        "dynamic_ltm": DynamicLTM(),
+        "ltm_archive": [],
+        "control": ControlState(
+            innovation_threshold=90,
+            feasibility_threshold=60,
+            top_k_plans=[PlanCandidate(
+                id="baseline",
+                title="经典基线",
+                description="稳健模型",
+                strategy_type="baseline",
+                innovation_score=20,
+                feasibility_score=90,
+            )],
+        ),
+        "artifacts": ArtifactBundle(),
+        "prompt_audit": {},
+    }
+    runtime = AgentRuntime.from_settings(
+        AppSettings(output_dir=Path("outputs"), api_key_env="MISSING_KEY_FOR_TEST")
+    )
+    result = realist_node(state, runtime=runtime)
+    assert result["control"].top_k_plans[0].verdict == "keep"
+    assert result["control"].selected_plan_id == "baseline"
+
+
+def test_innovation_separates_candidates_after_hard_quality_gates():
+    """核心质量均合格且相近时，可验证创新应显著影响最终排序。"""
+    baseline = PlanCandidate(
+        id="baseline",
+        title="经典基线",
+        description="稳健但常规",
+        strategy_type="baseline",
+        problem_fit_score=90,
+        data_assumption_score=90,
+        mathematical_correctness_score=90,
+        verifiability_score=90,
+        computability_score=90,
+        innovation_score=20,
+    )
+    innovative = PlanCandidate(
+        id="innovative",
+        title="结构化创新方案",
+        description="核心质量合格且创新可验证",
+        strategy_type="challenge",
+        problem_fit_score=85,
+        data_assumption_score=85,
+        mathematical_correctness_score=85,
+        verifiability_score=85,
+        computability_score=85,
+        innovation_score=90,
+    )
+
+    assert innovative.total_score() > baseline.total_score()
 
 
 def test_arbiter_routing_triggers_only_after_max_rounds():

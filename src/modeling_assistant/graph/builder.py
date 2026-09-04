@@ -26,6 +26,7 @@ from modeling_assistant.agents.nodes import (
     hitl_implementation_human_node,
     hitl_implementation_review_node,
     hitl_modeling_node,
+    hitl_plan_selection_node,
     load_bearing_analyzer_node,
     mathematician_node,
     milestone_reviewer_1_node,
@@ -50,6 +51,7 @@ from modeling_assistant.graph.routing import (
     route_after_implementation_human,
     route_after_implementation_review,
     route_after_milestone_reviewer_1,
+    route_after_plan_selection,
     route_after_realist,
     route_after_reflection,
     route_after_result_reviewer,
@@ -163,6 +165,7 @@ def build_graph(runtime: AgentRuntime | None = None, *, checkpointer: InMemorySa
     graph.add_node("writer", _bind_runtime(writer_node, resolved_runtime))
     graph.add_node("final_reviewer", _bind_runtime(final_reviewer_node, resolved_runtime))
     graph.add_node("hitl_final", _bind_runtime(hitl_final_node, resolved_runtime))
+    graph.add_node("hitl_plan_selection", _bind_runtime(hitl_plan_selection_node, resolved_runtime))
 
     graph.add_edge(START, "problem")
     # V11 修复：problem → fact_extractor → analyst，确保 Analyst 能看到机器提取的常量
@@ -180,24 +183,34 @@ def build_graph(runtime: AgentRuntime | None = None, *, checkpointer: InMemorySa
     graph.add_edge("searcher", "exemplar_loader")
     graph.add_edge("exemplar_loader", "mathematician")
     graph.add_edge("mathematician", "realist")
+    plan_selection_target = (
+        "hitl_plan_selection"
+        if resolved_runtime.settings.coder_external_mode == "human"
+        else "clarifier"
+    )
     graph.add_conditional_edges(
         "realist",
         route_after_realist,
         {
             "mathematician": "mathematician",
             "arbiter": "arbiter",
-            "clarifier": "clarifier",
+            "clarifier": plan_selection_target,
         },
     )
     graph.add_conditional_edges(
         "arbiter",
         route_after_arbiter,
-        {"clarifier": "clarifier", "rollback": "rollback", "hitl_arbitration": "hitl_arbitration"},
+        {"clarifier": plan_selection_target, "rollback": "rollback", "hitl_arbitration": "hitl_arbitration"},
     )
     graph.add_conditional_edges(
         "hitl_arbitration",
         route_after_arbiter,
-        {"clarifier": "clarifier", "rollback": "rollback", "hitl_arbitration": "hitl_arbitration"},
+        {"clarifier": plan_selection_target, "rollback": "rollback", "hitl_arbitration": "hitl_arbitration"},
+    )
+    graph.add_conditional_edges(
+        "hitl_plan_selection",
+        route_after_plan_selection,
+        {"clarifier": "clarifier", "mathematician": "mathematician"},
     )
     graph.add_edge("clarifier", "milestone_reviewer_1")
     graph.add_conditional_edges(

@@ -92,6 +92,16 @@ def _values_close(a: float, b: float, rel_tol: float = 0.05) -> bool:
     return abs(a - b) < max(rel_tol * abs(b), 0.01)
 
 
+def _fact_marked_irrelevant(fact: ProblemFact, dynamic_ltm: DynamicLTM) -> bool:
+    """判断 Clarifier 是否明确记录该常量与当前小题无关。"""
+    for key, decision in (dynamic_ltm.constant_relevance or {}).items():
+        key_text = str(key)
+        fact_tokens = (fact.context.strip(), f"{fact.value:g} {fact.unit}")
+        if any(token and (token in key_text or key_text in token) for token in fact_tokens):
+            return str(decision).strip().startswith("无关")
+    return False
+
+
 def check_ltm_against_facts(
     dynamic_ltm: DynamicLTM,
     static_ltm: StaticLTM,
@@ -128,6 +138,8 @@ def check_ltm_against_facts(
     # 按单位分组 problem_facts，便于主防线比对
     facts_by_unit: dict[str, list[ProblemFact]] = {}
     for fact in facts:
+        if _fact_marked_irrelevant(fact, dynamic_ltm):
+            continue
         if fact.unit not in _PHYSICAL_UNITS:
             continue
         # V11.4 修复：data_range 和 count 类 fact 跳过 LTM 数值比对
@@ -164,6 +176,8 @@ def check_ltm_against_facts(
     # 统计每个 (value, unit) 在 problem_facts 里出现的次数
     unit_value_count: Counter[tuple[float, str]] = Counter()
     for fact in facts:
+        if _fact_marked_irrelevant(fact, dynamic_ltm):
+            continue
         if fact.unit not in _PHYSICAL_UNITS:
             continue
         # V11.4 修复：data_range 和 count 类 fact 跳过"必须被引用"检查
@@ -284,6 +298,7 @@ def check_code_against_facts(
     code: str,
     static_ltm: StaticLTM,
     artifacts: ArtifactBundle | None = None,
+    dynamic_ltm: DynamicLTM | None = None,
 ) -> list[str]:
     """第三层校验：扫描 Coder 代码中的数值和列名，与 problem_facts 比对。
 
@@ -313,6 +328,8 @@ def check_code_against_facts(
     facts = static_ltm.problem_facts
     if facts:
         for fact in facts:
+            if dynamic_ltm is not None and _fact_marked_irrelevant(fact, dynamic_ltm):
+                continue
             if fact.unit not in _PHYSICAL_UNITS:
                 continue
             # V11.4 修复：data_range 和 count 类 fact 跳过字面量检查

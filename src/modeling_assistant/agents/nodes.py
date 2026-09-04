@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import random
@@ -768,6 +769,26 @@ def _update_plan_pool(control: ControlState, w_inn: float, w_fea: float) -> None
     control.plan_pool_ids = [p.id for p in ranked[: control.plan_pool_size]]
 
 
+def _apply_plan_gate(plan: PlanCandidate, threshold: int) -> None:
+    """应用证据优先硬门槛；创新性永远不作为淘汰条件。"""
+    hard_scores = (
+        plan.problem_fit_score,
+        plan.data_assumption_score,
+        plan.mathematical_correctness_score,
+        plan.computability_score,
+    )
+    if any(hard_scores):
+        if min(hard_scores) < threshold:
+            plan.verdict = "kill"
+        elif plan.verifiability_score < threshold:
+            plan.verdict = "reject"
+        else:
+            plan.verdict = "keep"
+    else:
+        # 兼容旧模型/旧测试响应：仅以可行性为硬门槛。
+        plan.verdict = "kill" if plan.feasibility_score < threshold else "keep"
+
+
 def mathematician_node(state: GraphState, runtime: AgentRuntime | None = None, config: dict | None = None) -> GraphState:
     """发散与创新：头脑风暴 Top-K 候选方案。
 
@@ -850,13 +871,29 @@ def mathematician_node(state: GraphState, runtime: AgentRuntime | None = None, c
             )
 
         source_version = archive[-1].version if archive else None
+        strategy_types = ("baseline", "primary", "challenge", "alternative")
         control.top_k_plans = [
             PlanCandidate(
-                id=plan.get("id", f"plan_{i}"),
+                id=(
+                    "candidate_"
+                    + hashlib.sha256(
+                        f"{control.debate_round}|{i}|{plan.get('title', '')}".encode("utf-8")
+                    ).hexdigest()[:6]
+                ),
                 title=plan.get("title", "未命名方案"),
                 description=plan.get("description", ""),
-                innovation_score=plan.get("innovation_score", 50),
-                feasibility_score=plan.get("feasibility_score", 50),
+                strategy_type=plan.get("strategy_type") or strategy_types[i],
+                input_data=plan.get("input_data", []),
+                assumptions=plan.get("assumptions", []),
+                mathematical_object=plan.get("mathematical_object", ""),
+                parameter_estimation=plan.get("parameter_estimation", ""),
+                solution_method=plan.get("solution_method", ""),
+                expected_outputs=plan.get("expected_outputs", []),
+                validation_method=plan.get("validation_method", ""),
+                failure_conditions=plan.get("failure_conditions", []),
+                # Mathematician 不再自评；由 Realist 独立赋值。
+                innovation_score=0,
+                feasibility_score=0,
                 source_snapshot_version=control.branch_from_version or source_version,
             )
             for i, plan in enumerate(response.plans)
@@ -883,8 +920,7 @@ def mathematician_node(state: GraphState, runtime: AgentRuntime | None = None, c
             "id": p.id,
             "title": p.title,
             "description": p.description,
-            "innovation_score": p.innovation_score,
-            "feasibility_score": p.feasibility_score,
+            "strategy_type": p.strategy_type,
         }
         for p in control.top_k_plans
     ]
@@ -906,8 +942,9 @@ def mathematician_node(state: GraphState, runtime: AgentRuntime | None = None, c
 def realist_node(state: GraphState, runtime: AgentRuntime | None = None, config: dict | None = None) -> GraphState:
     """挑刺与剪枝：从数据、算力、常识三维度评估每个方案。
 
-    - feasibility < threshold 的方案 → kill（剪枝）
-    - innovation < threshold 的方案 → reject（打回修改）
+    - 题目匹配/数据假设/数学正确性/可计算性未过硬门槛 → kill
+    - 可验证性未过硬门槛 → reject（打回补全）
+    - 创新性仅作加分项，不作为淘汰条件
     - 其余 → keep
     - 若全部被剪枝 → need_rebrainstorm = True，路由回 Mathematician
     - 否则选综合评分最高的 keep 方案为 selected_plan_id
@@ -940,16 +977,17 @@ def realist_node(state: GraphState, runtime: AgentRuntime | None = None, config:
             if plan:
                 plan.innovation_score = evaln.innovation_score
                 plan.feasibility_score = evaln.feasibility_score
-                plan.verdict = evaln.verdict
+                plan.problem_fit_score = evaln.problem_fit_score
+                plan.data_assumption_score = evaln.data_assumption_score
+                plan.mathematical_correctness_score = evaln.mathematical_correctness_score
+                plan.verifiability_score = evaln.verifiability_score
+                plan.computability_score = evaln.computability_score
+                plan.fatal_risks = list(evaln.fatal_risks)
+                plan.review_feedback = evaln.feedback
 
         # 应用阈值剪枝：覆盖未在 LLM 评估中的方案
         for plan in control.top_k_plans:
-            if plan.feasibility_score < control.feasibility_threshold:
-                plan.verdict = "kill"
-            elif plan.innovation_score < control.innovation_threshold:
-                plan.verdict = "reject"
-            else:
-                plan.verdict = "keep"
+            _apply_plan_gate(plan, control.feasibility_threshold)
 
         kept = [p for p in control.top_k_plans if p.verdict == "keep"]
         if kept:
@@ -968,12 +1006,7 @@ def realist_node(state: GraphState, runtime: AgentRuntime | None = None, config:
         logger.error("Realist LLM 调用失败: %s", exc)
         # fallback: 应用阈值剪枝并选最优
         for plan in control.top_k_plans:
-            if plan.feasibility_score < control.feasibility_threshold:
-                plan.verdict = "kill"
-            elif plan.innovation_score < control.innovation_threshold:
-                plan.verdict = "reject"
-            else:
-                plan.verdict = "keep"
+            _apply_plan_gate(plan, control.feasibility_threshold)
 
         kept = [p for p in control.top_k_plans if p.verdict == "keep"]
         if kept:
@@ -986,8 +1019,7 @@ def realist_node(state: GraphState, runtime: AgentRuntime | None = None, config:
             viable = [
                 plan
                 for plan in control.top_k_plans
-                if plan.innovation_score >= control.innovation_threshold
-                and plan.feasibility_score >= control.feasibility_threshold
+                if plan.feasibility_score >= control.feasibility_threshold
             ]
             selected = max(
                 viable or control.top_k_plans,
@@ -1016,6 +1048,11 @@ def realist_node(state: GraphState, runtime: AgentRuntime | None = None, config:
                     "plan_id": p.id,
                     "innovation_score": p.innovation_score,
                     "feasibility_score": p.feasibility_score,
+                    "problem_fit_score": p.problem_fit_score,
+                    "data_assumption_score": p.data_assumption_score,
+                    "mathematical_correctness_score": p.mathematical_correctness_score,
+                    "verifiability_score": p.verifiability_score,
+                    "computability_score": p.computability_score,
                     "verdict": p.verdict,
                 }
                 for p in control.top_k_plans
@@ -1143,6 +1180,8 @@ def clarifier_node(state: GraphState, runtime: AgentRuntime | None = None, confi
             equations=response.equations,
             objective=response.objective,
             solution_outline=response.solution_outline,
+            identifiability_checks=response.identifiability_checks,
+            constant_relevance=response.constant_relevance,
         )
     except Exception as exc:
         logger.error("Clarifier LLM 调用失败: %s", exc)
@@ -1166,6 +1205,8 @@ def clarifier_node(state: GraphState, runtime: AgentRuntime | None = None, confi
             equations=["Score_total = 0.5 * S_inn + 0.5 * S_fea"],
             objective=f"细化并执行：{plan_title}",
             solution_outline=plan_description,
+            identifiability_checks=["LLM 调用失败，需由人类完成参数可识别性检查。"],
+            constant_relevance={},
         )
 
     # 符号查重校验（公式闭环已移除，见 validation.py）
@@ -1226,6 +1267,8 @@ def clarifier_node(state: GraphState, runtime: AgentRuntime | None = None, confi
             "nomenclature": dict(new_dynamic_ltm.nomenclature),
             "equations": list(new_dynamic_ltm.equations),
             "solution_outline": new_dynamic_ltm.solution_outline,
+            "identifiability_checks": list(new_dynamic_ltm.identifiability_checks),
+            "constant_relevance": dict(new_dynamic_ltm.constant_relevance),
             "constant_issues": constant_issues,
             "validation_errors": validation_errors,
         },
@@ -1394,6 +1437,78 @@ def load_bearing_analyzer_node(
         "prompt_audit": audit,
         "process_log": [entry],
     }
+
+
+def hitl_plan_selection_node(state: GraphState, runtime: AgentRuntime | None = None, config: dict | None = None) -> GraphState:
+    """Human 模式下在 Clarifier 固化 LTM 前让人选择四个候选方案。"""
+    control = _control(state)
+    ranked = sorted(
+        control.top_k_plans,
+        key=lambda p: p.total_score(control.innovation_weight, control.feasibility_weight),
+        reverse=True,
+    )
+    plans = [
+        {
+            "id": p.id,
+            "title": p.title,
+            "strategy_type": p.strategy_type,
+            "description": p.description,
+            "problem_fit_score": p.problem_fit_score,
+            "data_assumption_score": p.data_assumption_score,
+            "mathematical_correctness_score": p.mathematical_correctness_score,
+            "verifiability_score": p.verifiability_score,
+            "computability_score": p.computability_score,
+            "innovation_score": p.innovation_score,
+            "feasibility_score": p.feasibility_score,
+            "verdict": p.verdict,
+            "validation_method": p.validation_method,
+            "failure_conditions": p.failure_conditions,
+            "fatal_risks": p.fatal_risks,
+            "review_feedback": p.review_feedback,
+        }
+        for p in ranked
+    ]
+    selectable = {p.id for p in ranked if p.verdict == "keep"}
+    decision = interrupt({
+        "stage": "plan_selection",
+        "message": "请在 Clarifier 固化数学模型前审核四个独立候选方案及其致命风险。",
+        "hint": (
+            f"输入 'approve' 采用当前方案（{control.selected_plan_id or '无'}）；"
+            f"'choose <plan_id>' 改选（可选 {sorted(selectable)}）；"
+            "'revise <反馈>' 返回 Mathematician 重新生成四个方案。"
+        ),
+        "plans": plans,
+        "selected_plan_id": control.selected_plan_id,
+    })
+    action = _parse_hitl_decision(decision)
+    if action["type"] == "choose":
+        chosen = str(action.get("version") or "").strip()
+        if chosen in selectable:
+            control.selected_plan_id = chosen
+            selected = next(p for p in ranked if p.id == chosen)
+            control.innovation_score = selected.innovation_score
+            control.feasibility_score = selected.feasibility_score
+            control.phase = "plan_selection_approved"
+        else:
+            control.phase = "plan_selection_approved"
+            control.rebrainstorm_feedback.append(f"忽略无效方案选择：{chosen}")
+    elif action["type"] in {"revise", "reject", "redirect"}:
+        feedback = str(action.get("version") or "").strip()
+        if feedback:
+            control.rebrainstorm_feedback.append(f"人工方案选择反馈：{feedback}")
+        control.need_rebrainstorm = True
+        control.modeling_revision_count += 1
+        control.phase = "plan_selection_rebrainstorm"
+    else:
+        control.phase = "plan_selection_approved"
+    control.hitl_required = False
+    control.hitl_stage = "none"
+    entry = _emit_process(
+        runtime, control, state, "hitl_plan_selection", "plan_selection_hitl",
+        f"人工方案选择：{action['type']}，当前方案 {control.selected_plan_id}",
+        {"decision": action["type"], "selected_plan_id": control.selected_plan_id},
+    )
+    return {"control": control, "process_log": [entry]}
 
 
 def hitl_architecture_node(state: GraphState, runtime: AgentRuntime | None = None, config: dict | None = None) -> GraphState:
@@ -2808,7 +2923,9 @@ def coder_node(state: GraphState, runtime: AgentRuntime | None = None, config: d
         # V11 修复：第三层常量校验 —— 在执行代码前做静态扫描
         # 如果发现关键常量缺失或列名错误，直接进入自修复循环，不消耗 budget
         from modeling_assistant.validation.constants import check_code_against_facts
-        constant_issues = check_code_against_facts(response.code, static_ltm, artifacts)
+        constant_issues = check_code_against_facts(
+            response.code, static_ltm, artifacts, _dynamic_ltm(state)
+        )
         if constant_issues:
             run_id = f"run_{control.coder_run_count}"
             issues_text = "\n".join(constant_issues)

@@ -38,8 +38,9 @@ class AppSettings(BaseModel):
     max_debate_rounds: int = 3
     innovation_threshold: int = 60
     feasibility_threshold: int = 60
-    innovation_weight: float = 0.5
-    feasibility_weight: float = 0.5
+    # 旧版二项评分的兼容权重；新版有细分评分时创新占 25%。
+    innovation_weight: float = 0.3
+    feasibility_weight: float = 0.7
     # ── Exemplar Learning System 配置 ──
     exemplars_dir: Path = Path("exemplars")
     exemplar_min_relevance: float = 0.25  # TF-IDF/标签相关性阈值，低于则不注入
@@ -104,10 +105,26 @@ class AppSettings(BaseModel):
             "load_bearing_analyzer": 16384,
         }
     )
+    llm_temperature_overrides: dict[str, float] = Field(
+        default_factory=lambda: {
+            "mathematician": 1.0,
+            "analyst": 0.6,
+            "data_analyst": 0.3,
+            "realist": 0.5,
+            "arbiter": 0.2,
+            "clarifier": 0.2,
+            "milestone_reviewer_1": 0.3,
+            "final_reviewer": 0.2,
+        }
+    )
 
     def max_tokens_for(self, prompt_name: str) -> int:
         """按节点返回输出上限：有覆盖用覆盖，否则用全局默认。"""
         return self.llm_max_tokens_overrides.get(prompt_name, self.llm_max_tokens)
+
+    def temperature_for(self, prompt_name: str) -> float:
+        """按节点返回采样温度；未覆盖时保持旧版 0.3。"""
+        return self.llm_temperature_overrides.get(prompt_name, 0.3)
 
     @property
     def api_key(self) -> str | None:
@@ -195,6 +212,8 @@ def load_settings(env_file: str | Path = ".env", **overrides: Any) -> AppSetting
         or file_values.get("MODELING_ASSISTANT_LLM_MAX_TOKENS"),
         "llm_max_tokens_overrides": os.getenv("MODELING_ASSISTANT_LLM_MAX_TOKENS_OVERRIDES")
         or file_values.get("MODELING_ASSISTANT_LLM_MAX_TOKENS_OVERRIDES"),
+        "llm_temperature_overrides": os.getenv("MODELING_ASSISTANT_LLM_TEMPERATURE_OVERRIDES")
+        or file_values.get("MODELING_ASSISTANT_LLM_TEMPERATURE_OVERRIDES"),
     }
 
     values: dict[str, Any] = {key: value for key, value in raw_values.items() if value is not None}
@@ -242,6 +261,13 @@ def load_settings(env_file: str | Path = ".env", **overrides: Any) -> AppSetting
         except (json.JSONDecodeError, TypeError):
             # 配置损坏时回退默认覆盖
             values.pop("llm_max_tokens_overrides", None)
+    if "llm_temperature_overrides" in values:
+        try:
+            values["llm_temperature_overrides"] = json.loads(
+                values["llm_temperature_overrides"]
+            )
+        except (json.JSONDecodeError, TypeError):
+            values.pop("llm_temperature_overrides", None)
 
     values.update(overrides)
     return AppSettings(**values)

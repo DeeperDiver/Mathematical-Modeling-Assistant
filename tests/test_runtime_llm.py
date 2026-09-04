@@ -71,7 +71,16 @@ def test_invoke_structured_retries_on_empty_content(tmp_path, monkeypatch):
         calls["max_tokens"] = max_tokens
         if calls["n"] == 1:
             return _fake_stream([""])
-        return _fake_stream(['{"plans": [{"id": "p1", "title": "方案"}]}'])
+        return _fake_stream(
+            [
+                '{"plans": ['
+                '{"id": "p1", "title": "基线方案"},'
+                '{"id": "p2", "title": "主方案"},'
+                '{"id": "p3", "title": "挑战方案"},'
+                '{"id": "p4", "title": "替代方案"}'
+                ']}'
+            ]
+        )
 
     monkeypatch.setattr(
         runtime.client.chat.completions,
@@ -152,7 +161,17 @@ def test_usage_recorded_to_log_and_jsonl(tmp_path, monkeypatch):
 
     def fake_create(model, messages, temperature, max_tokens, stream, stream_options):
         return [
-            _FakeStreamChunk(content='{"plans": [{"id": "p1", "title": "方案"}]}', finish_reason="stop"),
+            _FakeStreamChunk(
+                content=(
+                    '{"plans": ['
+                    '{"id": "p1", "title": "基线方案"},'
+                    '{"id": "p2", "title": "主方案"},'
+                    '{"id": "p3", "title": "挑战方案"},'
+                    '{"id": "p4", "title": "替代方案"}'
+                    ']}'
+                ),
+                finish_reason="stop",
+            ),
             # 真实 API 的 usage 尾块：无 choices、带 usage
             _FakeStreamChunk(usage=_Usage()),
         ]

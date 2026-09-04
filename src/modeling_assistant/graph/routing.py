@@ -29,10 +29,9 @@ def route_after_realist(state: GraphState) -> Literal["mathematician", "arbiter"
     4. 分数不达标 → mathematician；预算耗尽 → arbiter 仲裁
     """
     control = state["control"]
-    scores_ok = (
-        control.innovation_score >= control.innovation_threshold
-        and control.feasibility_score >= control.feasibility_threshold
-    )
+    # 创新性是加分项而非生存门槛；是否放行由证据硬门槛汇总后的
+    # feasibility_score 与 Realist 的 need_rebrainstorm 决定。
+    scores_ok = control.feasibility_score >= control.feasibility_threshold
     # 1. 超过最大轮数 → arbiter 检查退化
     if control.debate_round > control.max_debate_rounds:
         return "arbiter"
@@ -64,6 +63,13 @@ def route_after_arbiter(state: GraphState) -> Literal["clarifier", "rollback", "
         return "hitl_arbitration"
     if control.rollback_to_version:
         return "rollback"
+    return "clarifier"
+
+
+def route_after_plan_selection(state: GraphState) -> Literal["clarifier", "mathematician"]:
+    """人工方案选择：确认/改选后固化，要求重做则回到发散。"""
+    if state["control"].phase == "plan_selection_rebrainstorm":
+        return "mathematician"
     return "clarifier"
 
 

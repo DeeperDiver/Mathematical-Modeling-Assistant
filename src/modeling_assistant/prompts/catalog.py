@@ -84,8 +84,21 @@ class PromptContext:
         top_k_plans_json = "[]"
         if self.control is not None:
             ctrl_data = self.control.model_dump(mode="json")
+            # Realist 盲评：不暴露 Mathematician 的自评分、生成顺序偏好或既有 verdict，
+            # 避免锚定。只传方案内容与稳定 id。
+            blinded_plans = []
+            for plan in ctrl_data.get("top_k_plans", []):
+                blinded_plans.append({
+                    key: plan.get(key)
+                    for key in (
+                        "id", "title", "description", "strategy_type", "input_data",
+                        "assumptions", "mathematical_object", "parameter_estimation",
+                        "solution_method", "expected_outputs", "validation_method",
+                        "failure_conditions",
+                    )
+                })
             top_k_plans_json = json.dumps(
-                ctrl_data.get("top_k_plans", []),
+                blinded_plans,
                 ensure_ascii=False,
                 indent=2,
             )
