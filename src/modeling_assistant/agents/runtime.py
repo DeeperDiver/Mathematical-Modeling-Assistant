@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from openai import OpenAI
@@ -105,9 +106,14 @@ class AgentRuntime:
     def __post_init__(self) -> None:
         api_key = self.settings.api_key
         if api_key:
+            base_url = self.settings.api_base_url.rstrip("/")
+            # 裸域名沿用 OpenAI/DeepSeek 常见的 /v1；供应商已经提供版本化
+            # 路径（如智谱 /api/paas/v4）时必须原样使用。
+            if urlsplit(base_url).path in {"", "/"}:
+                base_url += "/v1"
             self.client = OpenAI(
                 api_key=api_key,
-                base_url=self.settings.api_base_url + "/v1",
+                base_url=base_url,
                 # V16 修复：DeepSeek 长响应偶发连接中断/read timeout，
                 # httpx 默认可能挂起数小时。显式设置超时上限：
                 # 连接 30s + 读取 300s，超时快速失败并走 invoke 重试，
@@ -144,6 +150,7 @@ class AgentRuntime:
             "llm_model": self.settings.llm_model,
             "output_dir": str(self.settings.output_dir),
             "method_knowledge_enabled": self.settings.method_knowledge_enabled,
+            "mathematician_max_columns": self.settings.mathematician_max_columns,
         }
         # V15：论文模板结构（writer 按模板章节输出；模板缺失时为空数组 + active=false）
         try:
@@ -183,11 +190,13 @@ class AgentRuntime:
             system_prompt = self.render_prompt(prompt_name, state)
         max_tokens = self.settings.max_tokens_for(prompt_name)
         temperature = self.settings.temperature_for(prompt_name)
+        reasoning_effort = self.settings.reasoning_effort_for(prompt_name)
         logger.info(
-            "Invoking LLM [%s] model=%s max_tokens=%d",
+            "Invoking LLM [%s] model=%s max_tokens=%d reasoning_effort=%s",
             prompt_name,
             self.settings.llm_model,
             max_tokens,
+            reasoning_effort or "default",
         )
 
         # V15.1 修复：推理模型（deepseek-v4-flash 等）在非流式调用 + 长 prompt 下
@@ -197,6 +206,10 @@ class AgentRuntime:
         finish_reason = None
         usage = None
         try:
+            request_options: dict[str, Any] = {}
+            if reasoning_effort:
+                request_options["reasoning_effort"] = reasoning_effort
+
             response = self.client.chat.completions.create(
                 model=self.settings.llm_model,
                 messages=[
@@ -207,6 +220,7 @@ class AgentRuntime:
                 max_tokens=max_tokens,
                 stream=True,
                 stream_options={"include_usage": True},
+                **request_options,
             )
             for chunk in response:
                 if not getattr(chunk, "choices", None):

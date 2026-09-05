@@ -20,6 +20,7 @@ def test_load_settings_from_env_file(tmp_path: Path):
                 "MODELING_ASSISTANT_LLM_MODEL=deepseek-test",
                 "MODELING_ASSISTANT_SEARCH_ENABLED=true",
                 "MODELING_ASSISTANT_MAX_DEBATE_ROUNDS=4",
+                "MODELING_ASSISTANT_MATHEMATICIAN_MAX_COLUMNS=24",
                 "MODELING_ASSISTANT_INNOVATION_WEIGHT=0.6",
                 "MODELING_ASSISTANT_FEASIBILITY_WEIGHT=0.4",
             ]
@@ -32,6 +33,7 @@ def test_load_settings_from_env_file(tmp_path: Path):
     assert settings.llm_model == "deepseek-test"
     assert settings.search_enabled is True
     assert settings.max_debate_rounds == 4
+    assert settings.mathematician_max_columns == 24
     assert settings.innovation_weight == 0.6
     assert settings.feasibility_weight == 0.4
 
@@ -82,6 +84,10 @@ def test_llm_max_tokens_overrides_defaults():
     settings = load_settings()
     assert settings.max_tokens_for("writer") == 32768
     assert settings.max_tokens_for("clarifier") == 24576
+    assert settings.max_tokens_for("architect") == 32768
+    assert settings.max_tokens_for("mathematician") == 32768
+    assert settings.max_tokens_for("realist") == 32768
+    assert settings.max_tokens_for("final_reviewer") == 16384
     assert settings.max_tokens_for("arbiter") == 4096
     assert settings.max_tokens_for("searcher") == 2048
 
@@ -1751,6 +1757,85 @@ def test_prompt_does_not_include_raw_data():
     # 紧凑摘要应保留文件边界与列结构
     assert "data/附件1.csv" in coder_prompt
     assert "数据概要" in coder_prompt
+
+
+def test_mathematician_uses_slim_deduplicated_context_and_relevant_columns():
+    from modeling_assistant.schemas.state import FileSummary, LiteratureItem, SubQuestionResult
+
+    columns = [
+        ColumnProfile(name=f"noise_col_{i}", dtype="float") for i in range(50)
+    ] + [ColumnProfile(name="目标温度", dtype="float")]
+    profile = DataProfile(
+        total_rows=100,
+        total_cols=len(columns),
+        columns=columns,
+        file_summaries=[
+            FileSummary(
+                path="C:/private/full/path/附件.csv",
+                rows=100,
+                cols=len(columns),
+                columns=columns,
+            )
+        ],
+    )
+    static = StaticLTM(
+        raw_problem="GLOBAL_RAW_PROBLEM_SHOULD_BE_REPLACED",
+        problem_understanding="全局任务摘要",
+        data_attachments=["C:/private/full/path/附件.csv"],
+        data_profile=profile,
+        data_findings=["UNIQUE_FINDING_MARKER"],
+        data_intelligence=["当前小题使用目标温度 UNIQUE_INTELLIGENCE_MARKER"],
+        literature=[
+            LiteratureItem(
+                title="参考方法",
+                authors="AUTHOR_METADATA_SHOULD_NOT_APPEAR",
+                source="SOURCE_METADATA_SHOULD_NOT_APPEAR",
+                summary="可用于方案启发",
+                url="https://secret.example/SHOULD_NOT_APPEAR",
+            )
+        ],
+    )
+    control = ControlState(
+        sub_questions=["FIRST_QUESTION", "SECOND_CURRENT_QUESTION：预测目标温度"],
+        current_sub_question_index=1,
+        sub_ltms=[
+            DynamicLTM(
+                assumptions=["PREVIOUS_ASSUMPTION_SHOULD_NOT_APPEAR"],
+                equations=["PREVIOUS_EQUATION_SHOULD_NOT_APPEAR"],
+                objective="前题目标",
+                solution_outline="PREVIOUS_INTERFACE_MARKER",
+                nomenclature={"R": "可复用参数"},
+            )
+        ],
+        sub_results=[
+            SubQuestionResult(index=0, title="前题", result_paths=["C:/x/q1.csv"])
+        ],
+    )
+    context = PromptContext(
+        static_ltm=static,
+        dynamic_ltm=DynamicLTM(equations=["CURRENT_EQUATION_MUST_REMAIN"]),
+        control=control,
+        extra={"mathematician_max_columns": 8},
+    )
+    math_prompt = PromptCatalog().render("mathematician", context)
+    coder_prompt = PromptCatalog().render("coder", context)
+
+    assert "SECOND_CURRENT_QUESTION" in math_prompt
+    assert "GLOBAL_RAW_PROBLEM_SHOULD_BE_REPLACED" not in math_prompt
+    assert "CURRENT_EQUATION_MUST_REMAIN" in math_prompt
+    assert "PREVIOUS_INTERFACE_MARKER" in math_prompt
+    assert "PREVIOUS_ASSUMPTION_SHOULD_NOT_APPEAR" not in math_prompt
+    assert "PREVIOUS_EQUATION_SHOULD_NOT_APPEAR" not in math_prompt
+    assert math_prompt.count("UNIQUE_FINDING_MARKER") == 1
+    assert math_prompt.count("UNIQUE_INTELLIGENCE_MARKER") == 1
+    assert "目标温度" in math_prompt
+    assert "noise_col_45" not in math_prompt
+    assert "noise_col_45" in coder_prompt
+    assert "AUTHOR_METADATA_SHOULD_NOT_APPEAR" not in math_prompt
+    assert "SOURCE_METADATA_SHOULD_NOT_APPEAR" not in math_prompt
+    assert "https://secret.example" not in math_prompt
+    assert "C:/private/full/path" not in math_prompt
+    assert '"columns_truncated": 43' in math_prompt
 
 
 def test_data_loader_builds_file_summaries(tmp_path):

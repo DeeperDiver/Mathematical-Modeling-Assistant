@@ -52,8 +52,9 @@
 - **运行过程记录与 token 记账**：逐节点留痕（建模阶段含候选方案/评分/
   提交的 LTM + system prompt 存档），每次 LLM 调用的输入/输出/缓存命中写入
   `outputs/logs/usage.jsonl`；运行报告头部汇总 token 消耗与输出 top 节点。
-- **分节点输出预算**：coder/writer/clarifier 保留大 max_tokens，
-  小节点压到 2–8K，避免 reasoner 推理空转（`max_tokens_for` 按节点取值）。
+- **分节点输出预算**：coder/writer/clarifier 与建模核心 mathematician/realist
+  保留大 max_tokens（32K），其余小节点压到 2–16K，避免 reasoner 推理空转
+  （`max_tokens_for` 按节点取值）。
 - **Exemplar Learning System**：从「题目 + 优秀论文」对学习论文结构、图表与文风（见下文）
 - **HITL**：架构确认 / 仲裁回滚 / 建模预算 / 终稿审查四处人工介入，
   CLI 交互或 `--auto-approve`
@@ -139,6 +140,11 @@ python scripts/leave_one_out_eval.py --exemplars exemplars
 ```text
 MODELING_ASSISTANT_LLM_MODEL=deepseek-chat
 MODELING_ASSISTANT_API_KEY_ENV=DEEPSEEK_API_KEY
+MODELING_ASSISTANT_REASONING_EFFORT=max
+# 可按节点覆盖推理强度（未列出的节点继承上面的全局值）
+MODELING_ASSISTANT_REASONING_EFFORT_OVERRIDES={"searcher":"low","analyst":"high","mathematician":"max","realist":"high","clarifier":"max","architect":"max","coder":"max","writer":"high","final_reviewer":"max"}
+# Mathematician 的数据画像最多注入多少列（按当前小题相关性筛选）
+MODELING_ASSISTANT_MATHEMATICIAN_MAX_COLUMNS=32
 MODELING_ASSISTANT_SEARCH_ENABLED=false
 MODELING_ASSISTANT_OUTPUT_DIR=outputs
 MODELING_ASSISTANT_MAX_DEBATE_ROUNDS=3
@@ -165,7 +171,7 @@ MODELING_ASSISTANT_PAPER_TEMPLATE_DIR=templates/cumcm-latex
 
 # LLM 输出预算（全局默认 + 分节点覆盖，JSON）
 MODELING_ASSISTANT_LLM_MAX_TOKENS=32768
-MODELING_ASSISTANT_LLM_MAX_TOKENS_OVERRIDES={"writer":32768,"coder":32768,"clarifier":24576,"architect":12288,"drawer":12288,"mathematician":8192,"realist":8192,"reflection":8192,"final_reviewer":8192,"arbiter":4096,"milestone_reviewer_1":4096,"meta_router":4096,"searcher":2048}
+MODELING_ASSISTANT_LLM_MAX_TOKENS_OVERRIDES={"writer":32768,"coder":32768,"architect":32768,"mathematician":32768,"realist":32768,"clarifier":24576,"final_reviewer":16384,"drawer":12288,"reflection":8192,"arbiter":4096,"milestone_reviewer_1":4096,"meta_router":4096,"searcher":2048}
 
 # 分节点采样温度：发散节点更高，评审/固化节点更低
 MODELING_ASSISTANT_LLM_TEMPERATURE_OVERRIDES={"mathematician":1.0,"analyst":0.6,"data_analyst":0.3,"realist":0.5,"arbiter":0.2,"clarifier":0.2,"milestone_reviewer_1":0.3,"final_reviewer":0.2}

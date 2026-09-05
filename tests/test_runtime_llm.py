@@ -20,6 +20,54 @@ def _runtime(tmp_path: Path, monkeypatch) -> AgentRuntime:
     return AgentRuntime.from_settings(settings)
 
 
+def test_runtime_preserves_versioned_vendor_base_url(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_TEST_KEY", "sk-test")
+    runtime = AgentRuntime.from_settings(AppSettings(
+        output_dir=tmp_path,
+        api_key_env="FAKE_TEST_KEY",
+        api_base_url="https://open.bigmodel.cn/api/paas/v4",
+    ))
+    assert str(runtime.client.base_url) == "https://open.bigmodel.cn/api/paas/v4/"
+
+
+def test_runtime_adds_v1_to_bare_base_url(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_TEST_KEY", "sk-test")
+    runtime = AgentRuntime.from_settings(AppSettings(
+        output_dir=tmp_path,
+        api_key_env="FAKE_TEST_KEY",
+        api_base_url="https://api.deepseek.com",
+    ))
+    assert str(runtime.client.base_url) == "https://api.deepseek.com/v1/"
+
+
+def test_invoke_passes_reasoning_effort_when_configured(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_TEST_KEY", "sk-test")
+    runtime = AgentRuntime.from_settings(AppSettings(
+        output_dir=tmp_path,
+        api_key_env="FAKE_TEST_KEY",
+        reasoning_effort="max",
+        reasoning_effort_overrides={"arbiter": "high"},
+    ))
+    captured = {}
+
+    def fake_create(**kwargs):
+        captured.update(kwargs)
+        return _fake_stream(["ok"])
+
+    monkeypatch.setattr(runtime.client.chat.completions, "create", fake_create)
+    runtime.invoke(
+        "arbiter",
+        {
+            "static_ltm": StaticLTM(raw_problem="测试"),
+            "dynamic_ltm": DynamicLTM(),
+        },
+        system_prompt="p",
+    )
+
+    assert captured["reasoning_effort"] == "high"
+    assert runtime.settings.reasoning_effort_for("coder") == "max"
+
+
 class _FakeMsg:
     def __init__(self, content: str):
         self.content = content
@@ -98,7 +146,7 @@ def test_invoke_structured_retries_on_empty_content(tmp_path, monkeypatch):
     assert calls["n"] == 2
     # max_tokens 应显式传给 API
     assert calls["max_tokens"] == runtime.settings.max_tokens_for("mathematician")
-    assert calls["max_tokens"] == 8192  # V17 分节点覆盖值
+    assert calls["max_tokens"] == 32768  # V17 分节点覆盖值
 
 
 def test_invoke_passes_per_node_max_tokens_fallback(tmp_path, monkeypatch):

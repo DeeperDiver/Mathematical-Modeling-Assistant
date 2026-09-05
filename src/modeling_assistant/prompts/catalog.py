@@ -30,38 +30,91 @@ def _compact_column_dict(col) -> dict:
     }
 
 
-def _compact_profile_dict(profile) -> dict:
+def _column_relevance_score(col, focus_text: str, position: int) -> int:
+    """Deterministic relevance score used by the Mathematician's slim data view."""
+    name = str(getattr(col, "name", "") or "").strip().lower()
+    focus = focus_text.lower()
+    score = max(6 - position, 0)  # retain a little source-order/schema signal
+    if name and name in focus:
+        score += 100
+    priority_terms = (
+        "target", "label", "outcome", "result", "score", "time", "date", "year",
+        "id", "目标", "结果", "得分", "时间", "日期", "年份", "编号", "经度", "纬度",
+    )
+    if any(term in name for term in priority_terms):
+        score += 20
+    # A column explicitly mentioned by a parse hint is structurally non-trivial.
+    if getattr(col, "parse_hint", ""):
+        score += 5
+    return score
+
+
+def _compact_profile_dict(
+    profile,
+    *,
+    max_columns: int | None = None,
+    focus_text: str = "",
+    basename_paths: bool = False,
+) -> dict:
     """数据画像的紧凑摘要：按文件保留边界，只含行列结构信息。
 
     V12 修复：原始数据（sample_head、全量相关性矩阵、全量样例）不进 prompt。
     LLM 只需要知道"每个文件是什么、有哪些列、列的类型/范围/缺失情况"，
     具体数值由 Coder 生成的代码在运行时读取。
     """
-    files: list[dict] = []
-    for fs in getattr(profile, "file_summaries", None) or []:
-        files.append(
-            {
-                "path": fs.path,
-                "rows": fs.rows,
-                "cols": fs.cols,
-                "issues": list(fs.issues or []),
-                "columns": [_compact_column_dict(c) for c in fs.columns],
-            }
-        )
-    if not files:
+    source_files = list(getattr(profile, "file_summaries", None) or [])
+    if not source_files:
         # 旧状态兜底：合并画像退化为单文件摘要
-        files.append(
-            {
+        source_files = [
+            type("LegacyFileSummary", (), {
                 "path": profile.file_paths[0] if profile.file_paths else "",
                 "rows": profile.total_rows,
                 "cols": profile.total_cols,
                 "issues": list(profile.issues or []),
-                "columns": [_compact_column_dict(c) for c in profile.columns],
+                "columns": list(profile.columns or []),
+            })()
+        ]
+
+    # Mathematician uses a bounded view. Other nodes keep the existing complete
+    # compact schema by leaving max_columns=None.
+    per_file_limits: list[int | None] = [None] * len(source_files)
+    if max_columns is not None:
+        total_budget = max(max_columns, len(source_files))
+        base, remainder = divmod(total_budget, len(source_files))
+        per_file_limits = [base + (1 if i < remainder else 0) for i in range(len(source_files))]
+
+    files: list[dict] = []
+    shown_total = 0
+    for file_index, fs in enumerate(source_files):
+        columns = list(fs.columns or [])
+        limit = per_file_limits[file_index]
+        if limit is not None and len(columns) > limit:
+            ranked = sorted(
+                enumerate(columns),
+                key=lambda pair: (
+                    -_column_relevance_score(pair[1], focus_text, pair[0]),
+                    pair[0],
+                ),
+            )[:limit]
+            selected_indexes = {index for index, _col in ranked}
+            columns = [col for index, col in enumerate(columns) if index in selected_indexes]
+        shown_total += len(columns)
+        files.append(
+            {
+                "path": Path(str(fs.path)).name if basename_paths else fs.path,
+                "rows": fs.rows,
+                "cols": fs.cols,
+                "issues": list(fs.issues or []),
+                "columns": [_compact_column_dict(c) for c in columns],
+                "shown_columns": len(columns),
+                "columns_truncated": max(int(fs.cols or len(fs.columns)) - len(columns), 0),
             }
         )
     return {
         "total_rows": profile.total_rows,
         "total_cols": profile.total_cols,
+        "shown_columns": shown_total,
+        "columns_truncated": max(int(profile.total_cols or 0) - shown_total, 0),
         "issues": list(profile.issues or []),
         "files": files,
     }
@@ -334,6 +387,172 @@ class PromptContext:
             if profile is not None:
                 static_data["data_profile_summary"] = _compact_profile_dict(profile)
             static_ltm_json = json.dumps(static_data, ensure_ascii=False, indent=2)
+
+        # Mathematician 专用精简视图：只携带发散决策所需的信息。完整原始数据、
+        # 全量列、长文献元数据和重复的数据洞察继续留在通用上下文中供其他节点使用。
+        mathematician_static_ltm_json = "{}"
+        mathematician_sub_question_context_json = "{}"
+        mathematician_data_findings_json = "[]"
+        mathematician_data_intelligence_json = "[]"
+        mathematician_empirical_refuted_json = "[]"
+        mathematician_empirical_open_questions_json = "[]"
+        mathematician_empirical_run_index_json = "[]"
+        mathematician_dynamic_ltm_json = "{}"
+        mathematician_archive_summary_json = json.dumps(
+            archive_summary(list(self.archive or []))[-10:],
+            ensure_ascii=False,
+            indent=2,
+        )
+        mathematician_rebrainstorm_feedback_json = "[]"
+        if self.dynamic_ltm is not None:
+            dynamic_for_math = self.dynamic_ltm.model_dump(mode="json")
+            mathematician_dynamic_ltm_json = json.dumps(
+                {
+                    "assumptions": (dynamic_for_math.get("assumptions", []) or [])[:12],
+                    "nomenclature": dict(
+                        list((dynamic_for_math.get("nomenclature", {}) or {}).items())[:40]
+                    ),
+                    "equations": (dynamic_for_math.get("equations", []) or [])[:16],
+                    "objective": str(dynamic_for_math.get("objective", ""))[:1000],
+                    "solution_outline": str(dynamic_for_math.get("solution_outline", ""))[:2000],
+                    "identifiability_checks": (
+                        dynamic_for_math.get("identifiability_checks", []) or []
+                    )[:10],
+                    "constant_relevance": dict(
+                        list((dynamic_for_math.get("constant_relevance", {}) or {}).items())[:30]
+                    ),
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+        if self.control is not None:
+            feedback_for_math = self.control.model_dump(mode="json").get(
+                "rebrainstorm_feedback", []
+            ) or []
+            mathematician_rebrainstorm_feedback_json = json.dumps(
+                [str(item)[:500] for item in feedback_for_math[-8:]],
+                ensure_ascii=False,
+                indent=2,
+            )
+        if self.static_ltm is not None:
+            static_obj = self.static_ltm
+            raw_problem = getattr(static_obj, "raw_problem", "") or ""
+            problem_understanding = getattr(static_obj, "problem_understanding", "") or ""
+            current_question = ""
+            ctrl_data_for_math: dict[str, Any] = {}
+            if self.control is not None:
+                ctrl_data_for_math = self.control.model_dump(mode="json")
+                questions = ctrl_data_for_math.get("sub_questions", []) or []
+                current_index = int(ctrl_data_for_math.get("current_sub_question_index", 0) or 0)
+                if current_index < len(questions):
+                    current_question = str(questions[current_index])
+
+            intelligence = list(getattr(static_obj, "data_intelligence", []) or [])
+            findings = list(getattr(static_obj, "data_findings", []) or [])
+            focus_text = "\n".join(
+                [current_question, problem_understanding, *map(str, intelligence)]
+            )
+            literature = list(getattr(static_obj, "literature", []) or [])[:5]
+            facts = list(getattr(static_obj, "problem_facts", []) or [])
+            math_static = {
+                "current_problem": current_question or raw_problem,
+                "global_problem_understanding": problem_understanding,
+                "data_attachments": [
+                    Path(str(path)).name
+                    for path in (getattr(static_obj, "data_attachments", []) or [])
+                ],
+                "data_schema": getattr(static_obj, "data_schema", {}) or {},
+                "problem_facts": [
+                    fact.model_dump(mode="json") if isinstance(fact, BaseModel) else fact
+                    for fact in facts
+                ],
+                "fact_role_mapping": getattr(static_obj, "fact_role_mapping", {}) or {},
+                "literature": [
+                    {
+                        "title": getattr(item, "title", ""),
+                        "summary": (getattr(item, "summary", "") or "")[:240],
+                    }
+                    for item in literature
+                ],
+            }
+            if profile is not None:
+                math_static["data_profile_summary"] = _compact_profile_dict(
+                    profile,
+                    max_columns=max(int(extra.get("mathematician_max_columns", 32)), 1),
+                    focus_text=focus_text,
+                    basename_paths=True,
+                )
+            mathematician_static_ltm_json = json.dumps(
+                math_static, ensure_ascii=False, indent=2
+            )
+            mathematician_data_findings_json = json.dumps(
+                [str(item)[:400] for item in findings[-10:]],
+                ensure_ascii=False,
+                indent=2,
+            )
+            mathematician_data_intelligence_json = json.dumps(
+                [str(item)[:500] for item in intelligence[:12]],
+                ensure_ascii=False,
+                indent=2,
+            )
+
+            previous_ltms = []
+            current_index = int(ctrl_data_for_math.get("current_sub_question_index", 0) or 0)
+            for index, ltm in enumerate(ctrl_data_for_math.get("sub_ltms", []) or []):
+                if index >= current_index:
+                    continue
+                nomenclature = ltm.get("nomenclature", {}) or {}
+                previous_ltms.append(
+                    {
+                        "index": index,
+                        "objective": ltm.get("objective", ""),
+                        "solution_outline": str(ltm.get("solution_outline", ""))[:600],
+                        "exported_symbols": dict(list(nomenclature.items())[:12]),
+                    }
+                )
+            previous_results = []
+            for result in ctrl_data_for_math.get("sub_results", []) or []:
+                if int(result.get("index", 0) or 0) >= current_index:
+                    continue
+                previous_results.append(
+                    {
+                        "index": result.get("index", 0),
+                        "title": result.get("title", ""),
+                        "status": result.get("status", ""),
+                        "result_files": [
+                            Path(str(path)).name for path in (result.get("result_paths", []) or [])
+                        ],
+                    }
+                )
+            mathematician_sub_question_context_json = json.dumps(
+                {
+                    "current_index": current_index,
+                    "current_text": current_question,
+                    "total": len(ctrl_data_for_math.get("sub_questions", []) or []),
+                    "previous_interfaces": previous_ltms,
+                    "previous_results": previous_results,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
+
+        if self.empirical is not None:
+            emp_data_for_math = self.empirical.model_dump(mode="json")
+            mathematician_empirical_refuted_json = json.dumps(
+                [str(item)[:400] for item in (emp_data_for_math.get("refuted_assumptions", []) or [])[-10:]],
+                ensure_ascii=False,
+                indent=2,
+            )
+            mathematician_empirical_open_questions_json = json.dumps(
+                [str(item)[:400] for item in (emp_data_for_math.get("open_questions", []) or [])[-8:]],
+                ensure_ascii=False,
+                indent=2,
+            )
+            mathematician_empirical_run_index_json = json.dumps(
+                (emp_data_for_math.get("run_index", []) or [])[-6:],
+                ensure_ascii=False,
+                indent=2,
+            )
         # V12 新增：Architect 声明的结果契约（Architect → Coder → ResultReviewer 共用）
         result_contract_json = "{}"
         if self.artifacts is not None:
@@ -666,6 +885,16 @@ class PromptContext:
                 logger.warning("方法知识库注入失败（降级为空知识）: %s", exc)
         return {
             "static_ltm_json": static_ltm_json,
+            "mathematician_static_ltm_json": mathematician_static_ltm_json,
+            "mathematician_sub_question_context_json": mathematician_sub_question_context_json,
+            "mathematician_data_findings_json": mathematician_data_findings_json,
+            "mathematician_data_intelligence_json": mathematician_data_intelligence_json,
+            "mathematician_empirical_refuted_json": mathematician_empirical_refuted_json,
+            "mathematician_empirical_open_questions_json": mathematician_empirical_open_questions_json,
+            "mathematician_empirical_run_index_json": mathematician_empirical_run_index_json,
+            "mathematician_dynamic_ltm_json": mathematician_dynamic_ltm_json,
+            "mathematician_archive_summary_json": mathematician_archive_summary_json,
+            "mathematician_rebrainstorm_feedback_json": mathematician_rebrainstorm_feedback_json,
             "dynamic_ltm_json": _json_model(self.dynamic_ltm),
             "archive_json": _json_list(self.archive or []),
             "archive_summary_json": archive_summary_json,

@@ -30,6 +30,9 @@ def _read_env_file(path: Path) -> dict[str, str]:
 
 class AppSettings(BaseModel):
     llm_model: str = "deepseek-chat"
+    reasoning_effort: str | None = None
+    reasoning_effort_overrides: dict[str, str] = Field(default_factory=dict)
+    mathematician_max_columns: int = 32
     api_key_env: str = "DEEPSEEK_API_KEY"
     api_base_url: str = "https://api.deepseek.com"
     search_enabled: bool = True
@@ -81,22 +84,23 @@ class AppSettings(BaseModel):
     # 实测 clarifier（完整 LTM：假设/符号表/公式/目标/思路）输出可达 8K+ tokens，
     # 8192 会被 finish=length 截断，故默认 32768。
     llm_max_tokens: int = 32768
-    # V17 分节点输出预算：coder/writer 需要长输出保留大上限；
-    # 小节点压低，避免 reasoner 推理空转与异常发散。
+    # V17 分节点输出预算：coder/writer 与建模发散/评审核心
+    # （mathematician/realist）需要长输出保留大上限；
+    # 其余小节点压低，避免 reasoner 推理空转与异常发散。
     # 原则：cap 必须高于该节点正常峰值输出（+推理余量），否则会截断导致重试。
     llm_max_tokens_overrides: dict[str, int] = Field(
         default_factory=lambda: {
             "coder": 32768,
             "writer": 32768,
             "clarifier": 24576,
-            "architect": 12288,
+            "architect": 32768,
             "drawer": 12288,
             "analyst": 8192,
             "data_analyst": 8192,
-            "mathematician": 8192,
-            "realist": 8192,
+            "mathematician": 32768,
+            "realist": 32768,
             "reflection": 8192,
-            "final_reviewer": 8192,
+            "final_reviewer": 16384,
             "arbiter": 4096,
             "milestone_reviewer_1": 4096,
             "meta_router": 4096,
@@ -125,6 +129,10 @@ class AppSettings(BaseModel):
     def temperature_for(self, prompt_name: str) -> float:
         """按节点返回采样温度；未覆盖时保持旧版 0.3。"""
         return self.llm_temperature_overrides.get(prompt_name, 0.3)
+
+    def reasoning_effort_for(self, prompt_name: str) -> str | None:
+        """按节点返回推理强度；未覆盖时继承全局设置。"""
+        return self.reasoning_effort_overrides.get(prompt_name, self.reasoning_effort)
 
     @property
     def api_key(self) -> str | None:
@@ -164,6 +172,12 @@ def load_settings(env_file: str | Path = ".env", **overrides: Any) -> AppSetting
         "llm_model": os.getenv("MODELING_ASSISTANT_LLM_MODEL")
         or file_values.get("MODELING_ASSISTANT_LLM_MODEL")
         or file_values.get("DEEPSEEK_MODEL"),
+        "reasoning_effort": os.getenv("MODELING_ASSISTANT_REASONING_EFFORT")
+        or file_values.get("MODELING_ASSISTANT_REASONING_EFFORT"),
+        "reasoning_effort_overrides": os.getenv("MODELING_ASSISTANT_REASONING_EFFORT_OVERRIDES")
+        or file_values.get("MODELING_ASSISTANT_REASONING_EFFORT_OVERRIDES"),
+        "mathematician_max_columns": os.getenv("MODELING_ASSISTANT_MATHEMATICIAN_MAX_COLUMNS")
+        or file_values.get("MODELING_ASSISTANT_MATHEMATICIAN_MAX_COLUMNS"),
         "api_key_env": os.getenv("MODELING_ASSISTANT_API_KEY_ENV")
         or file_values.get("MODELING_ASSISTANT_API_KEY_ENV"),
         "api_base_url": os.getenv("MODELING_ASSISTANT_API_BASE_URL")
@@ -229,6 +243,7 @@ def load_settings(env_file: str | Path = ".env", **overrides: Any) -> AppSetting
         "plagiarism_ngram",
         "coder_external_timeout",
         "llm_max_tokens",
+        "mathematician_max_columns",
     ):
         if key in values:
             values[key] = int(values[key])
@@ -268,6 +283,13 @@ def load_settings(env_file: str | Path = ".env", **overrides: Any) -> AppSetting
             )
         except (json.JSONDecodeError, TypeError):
             values.pop("llm_temperature_overrides", None)
+    if "reasoning_effort_overrides" in values:
+        try:
+            values["reasoning_effort_overrides"] = json.loads(
+                values["reasoning_effort_overrides"]
+            )
+        except (json.JSONDecodeError, TypeError):
+            values.pop("reasoning_effort_overrides", None)
 
     values.update(overrides)
     return AppSettings(**values)

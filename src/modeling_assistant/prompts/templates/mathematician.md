@@ -33,35 +33,35 @@
 {type_knowledge}
 
 【已证伪的假设】（高置信度，禁止再提相关方案，必须在新方案中规避或修正）
-{empirical_refuted_json}
+{mathematician_empirical_refuted_json}
 
 【待验证的观察】（低置信度，仅供参考，不要盲信但可以在方案中讨论）
-{empirical_open_questions_json}
+{mathematician_empirical_open_questions_json}
 
 【历史执行证据索引】（如需查看某次执行的完整 stdout 日志，请在 `requested_evidence_run_id` 字段中指定 run_id，系统会补充该次执行的原始输出）
-{empirical_run_index_json}
+{mathematician_empirical_run_index_json}
 
 【数据认知更新】（数据加载阶段发现的、对原始 schema 的补充认知，建模时必须考虑）
-{data_findings_json}
+{mathematician_data_findings_json}
 
 【数据智能摘要】（LLM 已基于数据概要提炼：每个文件是什么、关键列、如何关联）：
-{data_intelligence_json}
+{mathematician_data_intelligence_json}
 
 【小题上下文】（V14：前小题 LTM 与结果，当前小题必须知情但独立建模）：
-{sub_question_context_json}
+{mathematician_sub_question_context_json}
 
 【参考文献说明】
 静态 LTM 的 literature 字段为系统检索到的参考文献（标题/作者）。
 文献可作为启发和参考，不强制引用，也不得虚构。
 
 静态 LTM：
-{static_ltm_json}
+{mathematician_static_ltm_json}
 
 动态 LTM：
-{dynamic_ltm_json}
+{mathematician_dynamic_ltm_json}
 
 LTM Archive 变更摘要（仅含版本号与变更说明，不含完整公式设定）：
-{archive_summary_json}
+{mathematician_archive_summary_json}
 
 **如果你需要某个版本的完整公式和设定**，请在输出的 `requested_version` 字段中指定版本号，系统会为你补充该版本的完整细节。
 
@@ -69,7 +69,7 @@ LTM Archive 变更摘要（仅含版本号与变更说明，不含完整公式�
 {branch_from_version}
 
 外部评审反馈（如被 Milestone Reviewer 1 打回，请重点处理）：
-{rebrainstorm_feedback_json}
+{mathematician_rebrainstorm_feedback_json}
 
 **必须严格按以下 JSON 格式输出（不要包含其他文字）：**
 ```json
